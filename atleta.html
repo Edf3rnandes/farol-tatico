@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="theme-color" content="#0e1116">
+<title>Farol Tático</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='20' r='9' fill='%23f2b544'/%3E%3Cpath d='M14 58 L26 26 L38 26 L50 58 Z' fill='%234aa8ff'/%3E%3C/svg%3E">
+<style>
+  :root{
+    --bg:#0e1116; --card:#161b22; --card2:#1c232c; --line:#2a323d;
+    --tx:#e6edf3; --tx2:#9aa7b4; --tx3:#6e7d8c;
+    --a:#4aa8ff; --a-dark:#2f7fd6; --b:#f2b544; --c:#57d38c; --d:#e0685f;
+  }
+  @media (prefers-color-scheme: light){
+    :root{ --bg:#f6f7f9; --card:#fff; --card2:#f0f2f5; --line:#dde1e7;
+           --tx:#12161c; --tx2:#525d6b; --tx3:#7b8794;
+           --a:#0b6bcb; --a-dark:#084e94; --b:#a1701a; --c:#1f7a4d; --d:#b03a30; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--tx);
+       font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+       -webkit-text-size-adjust:100%}
+  #app{min-height:100vh;display:flex;flex-direction:column}
+  .main{flex:1;width:100%;max-width:480px;margin:0 auto;padding:22px 16px 60px}
+  .center-screen{flex:1;display:flex;align-items:center;justify-content:center;padding:20px}
+
+  .logo{display:flex;align-items:center;gap:9px;font-weight:700;font-size:1rem;
+        color:var(--tx2);justify-content:center;margin-bottom:22px}
+  .logo svg{width:20px;height:20px;flex:none}
+
+  h1{font-size:1.4rem;margin:0 0 4px;letter-spacing:-.01em}
+  .muted{color:var(--tx2);font-size:.9rem;margin:0 0 4px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;
+        padding:22px 20px;margin-bottom:16px}
+  .card h2{font-size:1.02rem;margin:0 0 3px}
+  .card .desc{color:var(--tx2);font-size:.85rem;margin:0 0 18px}
+
+  .scale-label{display:flex;justify-content:space-between;font-size:.74rem;
+               color:var(--tx3);margin:2px 2px 8px}
+  .scale{display:grid;grid-template-columns:repeat(6,1fr);gap:7px;margin-bottom:4px}
+  .scale button{aspect-ratio:1;border-radius:10px;border:1px solid var(--line);
+                background:var(--card2);color:var(--tx);font-size:1rem;font-weight:700;
+                cursor:pointer;transition:transform .08s}
+  .scale button.on{background:var(--a);border-color:var(--a);color:#fff;transform:scale(1.06)}
+  .scale button:active{transform:scale(.94)}
+
+  .field{margin:16px 0}
+  .field label{display:block;font-size:.82rem;color:var(--tx2);margin-bottom:6px;font-weight:600}
+  .field input, .field select{
+    width:100%;background:var(--card2);border:1px solid var(--line);color:var(--tx);
+    border-radius:10px;padding:12px 13px;font-size:1rem;font-family:inherit}
+  .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+
+  .btn{appearance:none;border:1px solid var(--line);background:var(--card2);color:var(--tx);
+       border-radius:11px;padding:14px;font-size:1rem;font-weight:700;cursor:pointer;
+       width:100%}
+  .btn-primary{background:var(--a);border-color:var(--a);color:#fff;margin-top:6px}
+  .btn-primary:disabled{opacity:.5}
+
+  .empty{padding:60px 20px;text-align:center;color:var(--tx2)}
+  .empty svg{width:52px;height:52px;margin-bottom:14px;color:var(--c)}
+  .erro{padding:40px 20px;text-align:center}
+  .erro svg{width:44px;height:44px;color:var(--d);margin-bottom:14px}
+
+  .ok-check{display:flex;align-items:center;gap:10px;color:var(--c);font-weight:700;
+            font-size:.92rem;padding:6px 0}
+  .ok-check svg{width:20px;height:20px;flex:none}
+
+  .spinner{width:26px;height:26px;border-radius:50%;border:3px solid var(--line);
+           border-top-color:var(--a);animation:spin .8s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);
+         background:var(--card);border:1px solid var(--d);color:var(--d);
+         padding:11px 18px;border-radius:10px;font-size:.86rem;box-shadow:0 8px 24px rgba(0,0,0,.25);
+         z-index:50;max-width:90vw;text-align:center}
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+/* =====================================================================
+   FAROL TÁTICO — página do atleta
+   Sem login. O link (token) na URL identifica quem é. Aberto pelo
+   WhatsApp, antes do treino (PSR) e depois do treino (PSE).
+   ===================================================================== */
+
+const SUPABASE_URL = 'https://gtygargcfbayfbgontus.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_-5pYhC2C1QS3X6HysBHzLg_L6g9TWWs';
+
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
+  db: { schema: 'ft' },
+  auth: { persistSession: false }
+});
+
+const app = document.getElementById('app');
+const TOKEN = new URLSearchParams(location.search).get('t');
+
+const LOCAIS_DOR = [
+  ['ombro','Ombro'], ['cotovelo','Cotovelo'], ['punho','Punho/mão'],
+  ['lombar','Lombar'], ['quadril','Quadril'], ['coxa','Coxa'],
+  ['joelho','Joelho'], ['panturrilha','Panturrilha'],
+  ['tornozelo','Tornozelo'], ['pe','Pé'], ['outro','Outro'],
+];
+
+let state = {
+  fase: 'carregando',   // carregando | sem-token | erro | pronto
+  info: null,
+  erro: '',
+  psr: { valor: null, horas_sono: '', dor: 0, dor_local: '', dor_lado: 'D', estresse: null, fadiga: null, enviando: false, enviado: false },
+  pse: { valor: null, enviando: false, enviado: false },
+};
+
+function escapeHtml(s){
+  if (s === null || s === undefined) return '';
+  return String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+}
+
+function toast(msg){
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 4500);
+}
+
+function logoSvg(){
+  return `<svg viewBox="0 0 64 64" fill="none">
+    <circle cx="32" cy="20" r="9" fill="var(--b)"/>
+    <path d="M14 58 L26 26 L38 26 L50 58 Z" fill="var(--a)"/>
+  </svg>`;
+}
+
+async function carregar(){
+  if (!TOKEN){
+    state.fase = 'sem-token';
+    render();
+    return;
+  }
+  state.fase = 'carregando';
+  render();
+
+  const { data, error } = await sb.rpc('token_info', { p_token: TOKEN });
+
+  if (error){
+    state.fase = 'erro';
+    state.erro = error.message.includes('inválido') || error.message.includes('expirado')
+      ? 'Este link não é mais válido. Peça um novo à comissão técnica.'
+      : 'Não consegui carregar seus dados: ' + error.message;
+    render();
+    return;
+  }
+
+  const info = Array.isArray(data) ? data[0] : data;
+  state.info = info;
+  state.fase = 'pronto';
+  render();
+}
+
+/* ---------------------------- PSR ---------------------------- */
+
+// O render() reconstrói a tela inteira do zero a cada clique. Sem isto, um
+// campo de texto livre (horas de sono, local da dor) que o atleta já tinha
+// preenchido seria apagado no primeiro toque em qualquer botão de escala,
+// porque o HTML novo é montado a partir do `state`, não do que está na tela.
+function sincronizarPsrDoDom(){
+  const sono = document.getElementById('p-sono');
+  const local = document.getElementById('p-dor-local');
+  if (sono)  state.psr.horas_sono = sono.value;
+  if (local) state.psr.dor_local = local.value;
+}
+
+function setPsrValor(v){ sincronizarPsrDoDom(); state.psr.valor = v; render(); }
+function setPsrDor(v){ sincronizarPsrDoDom(); state.psr.dor = v; render(); }
+function setPsrEstresse(v){ sincronizarPsrDoDom(); state.psr.estresse = v; render(); }
+function setPsrFadiga(v){ sincronizarPsrDoDom(); state.psr.fadiga = v; render(); }
+function setPsrLado(v){ sincronizarPsrDoDom(); state.psr.dor_lado = v; render(); }
+
+async function enviarPsr(ev){
+  ev.preventDefault();
+  const p = state.psr;
+  if (p.valor === null){ toast('Toca em um número para o PSR antes de enviar.'); return; }
+
+  p.enviando = true; render();
+
+  const horasSono = document.getElementById('p-sono')?.value || null;
+  const dorLocal = document.getElementById('p-dor-local')?.value || null;
+
+  const { error } = await sb.rpc('responder_psr', {
+    p_token: TOKEN,
+    p_psr: p.valor,
+    p_horas_sono: horasSono ? Number(horasSono) : null,
+    p_qualidade_sono: null,
+    p_dor: p.dor,
+    p_dor_local: p.dor > 0 ? (dorLocal || null) : null,
+    p_dor_lado: p.dor > 0 ? p.dor_lado : null,
+    p_estresse: p.estresse,
+    p_fadiga: p.fadiga,
+  });
+
+  p.enviando = false;
+
+  if (error){
+    toast('Não consegui enviar: ' + error.message);
+    render();
+    return;
+  }
+
+  p.enviado = true;
+  state.info.psr_pendente = false;
+  render();
+}
+
+/* ---------------------------- PSE ---------------------------- */
+
+function setPseValor(v){ state.pse.valor = v; render(); }
+
+async function enviarPse(ev){
+  ev.preventDefault();
+  const p = state.pse;
+  if (p.valor === null){ toast('Toca em um número para o PSE antes de enviar.'); return; }
+
+  p.enviando = true; render();
+
+  const { error } = await sb.rpc('responder_pse', {
+    p_token: TOKEN,
+    p_sessao_id: state.info.pse_sessao_id,
+    p_pse: p.valor,
+  });
+
+  p.enviando = false;
+
+  if (error){
+    toast('Não consegui enviar: ' + error.message);
+    render();
+    return;
+  }
+
+  p.enviado = true;
+  state.info.pse_sessao_id = null;
+  render();
+}
+
+/* ============================== RENDER ============================== */
+
+function escalaHtml(prefixo, atual, onClick, min = 0, max = 10){
+  let botoes = '';
+  for (let i = min; i <= max; i++){
+    botoes += `<button type="button" class="${atual === i ? 'on' : ''}" onclick="${onClick}(${i})">${i}</button>`;
+  }
+  return `<div class="scale">${botoes}</div>`;
+}
+
+function render(){
+  if (state.fase === 'carregando') return renderCarregando();
+  if (state.fase === 'sem-token')  return renderSemToken();
+  if (state.fase === 'erro')       return renderErro();
+  return renderPronto();
+}
+
+function renderCarregando(){
+  app.innerHTML = `<div class="center-screen"><div class="spinner"></div></div>`;
+}
+
+function renderSemToken(){
+  app.innerHTML = `
+    <div class="main">
+      <div class="logo">${logoSvg()} Farol Tático</div>
+      <div class="erro">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v5M12 16h.01"/></svg>
+        <h1>Link incompleto</h1>
+        <p class="muted">Este endereço não tem o código do atleta. Peça o link certinho para a comissão técnica.</p>
+      </div>
+    </div>`;
+}
+
+function renderErro(){
+  app.innerHTML = `
+    <div class="main">
+      <div class="logo">${logoSvg()} Farol Tático</div>
+      <div class="erro">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v5M12 16h.01"/></svg>
+        <h1>Não foi possível abrir</h1>
+        <p class="muted">${escapeHtml(state.erro)}</p>
+      </div>
+    </div>`;
+}
+
+function renderPronto(){
+  const info = state.info;
+  const nome = info.apelido || info.nome || 'atleta';
+  const nadaPendente = !info.psr_pendente && !info.pse_sessao_id && !state.psr.enviado && !state.pse.enviado;
+
+  app.innerHTML = `
+    <div class="main">
+      <div class="logo">${logoSvg()} Farol Tático</div>
+      <h1>Oi, ${escapeHtml(nome)}!</h1>
+      <p class="muted" style="margin-bottom:22px">${new Date().toLocaleDateString('pt-BR', { weekday:'long', day:'numeric', month:'long' })}</p>
+
+      ${info.psr_pendente ? renderCardPsr() : (state.psr.enviado ? renderConfirmadoPsr() : '')}
+      ${info.pse_sessao_id ? renderCardPse() : (state.pse.enviado ? renderConfirmadoPse() : '')}
+
+      ${nadaPendente ? `
+        <div class="empty">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg>
+          <div>Tudo certo por hoje.</div>
+        </div>
+      ` : ''}
+    </div>`;
+}
+
+function renderConfirmadoPsr(){
+  return `<div class="card"><div class="ok-check">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg>
+    Recuperação de hoje registrada. Valeu!
+  </div></div>`;
+}
+function renderConfirmadoPse(){
+  return `<div class="card"><div class="ok-check">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg>
+    Esforço do treino registrado. Bom descanso!
+  </div></div>`;
+}
+
+function renderCardPsr(){
+  const p = state.psr;
+  return `
+    <div class="card">
+      <h2>Antes de treinar</h2>
+      <p class="desc">Como você está se sentindo hoje?</p>
+
+      <form onsubmit="enviarPsr(event)">
+        <label style="font-size:.82rem;color:var(--tx2);font-weight:600">Recuperação (0 = péssima, 10 = ótima)</label>
+        <div class="scale-label"><span>péssima</span><span>ótima</span></div>
+        ${escalaHtml('psr', p.valor, 'setPsrValor')}
+
+        <div class="field">
+          <label>Quantas horas você dormiu?</label>
+          <input id="p-sono" type="number" step="0.5" min="0" max="14" inputmode="decimal" placeholder="ex: 7.5" value="${p.horas_sono}">
+        </div>
+
+        <div class="field">
+          <label>Dor muscular (0 = nenhuma, 10 = forte)</label>
+          ${escalaHtml('dor', p.dor, 'setPsrDor')}
+        </div>
+
+        ${p.dor > 0 ? `
+          <div class="row2">
+            <div class="field">
+              <label>Onde dói?</label>
+              <select id="p-dor-local">
+                <option value="">Selecione…</option>
+                ${LOCAIS_DOR.map(([c,n]) => `<option value="${c}" ${p.dor_local===c?'selected':''}>${n}</option>`).join('')}
+              </select>
+            </div>
+            <div class="field">
+              <label>Lado</label>
+              <select onchange="setPsrLado(this.value)">
+                <option value="D" ${p.dor_lado==='D'?'selected':''}>Direito</option>
+                <option value="E" ${p.dor_lado==='E'?'selected':''}>Esquerdo</option>
+                <option value="ambos" ${p.dor_lado==='ambos'?'selected':''}>Os dois</option>
+              </select>
+            </div>
+          </div>
+        ` : ''}
+
+        <div class="field">
+          <label>Estresse fora da quadra (0 = tranquilo, 10 = muito estressado)</label>
+          ${escalaHtml('estresse', p.estresse, 'setPsrEstresse')}
+        </div>
+
+        <div class="field">
+          <label>Cansaço geral (0 = descansado, 10 = exausto)</label>
+          ${escalaHtml('fadiga', p.fadiga, 'setPsrFadiga')}
+        </div>
+
+        <button class="btn btn-primary" ${p.enviando ? 'disabled' : ''}>${p.enviando ? 'Enviando…' : 'Enviar'}</button>
+      </form>
+    </div>`;
+}
+
+function renderCardPse(){
+  const p = state.pse;
+  return `
+    <div class="card">
+      <h2>Depois do treino</h2>
+      <p class="desc">${escapeHtml(state.info.pse_sessao_label || 'Como foi o esforço no treino de hoje?')}</p>
+
+      <form onsubmit="enviarPse(event)">
+        <label style="font-size:.82rem;color:var(--tx2);font-weight:600">Esforço (0 = nada, 10 = máximo que você já fez)</label>
+        <div class="scale-label"><span>nada</span><span>máximo</span></div>
+        ${escalaHtml('pse', p.valor, 'setPseValor')}
+        <button class="btn btn-primary" ${p.enviando ? 'disabled' : ''}>${p.enviando ? 'Enviando…' : 'Enviar'}</button>
+      </form>
+    </div>`;
+}
+
+carregar();
+</script>
+</body>
+</html>

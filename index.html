@@ -1,0 +1,1369 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="theme-color" content="#0e1116">
+<title>Farol Tático</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='20' r='9' fill='%23f2b544'/%3E%3Cpath d='M14 58 L26 26 L38 26 L50 58 Z' fill='%234aa8ff'/%3E%3C/svg%3E">
+<style>
+  :root{
+    --bg:#0e1116; --card:#161b22; --card2:#1c232c; --line:#2a323d;
+    --tx:#e6edf3; --tx2:#9aa7b4; --tx3:#6e7d8c;
+    --a:#4aa8ff; --a-dark:#2f7fd6; --b:#f2b544; --c:#57d38c; --d:#e0685f;
+  }
+  @media (prefers-color-scheme: light){
+    :root{ --bg:#f6f7f9; --card:#fff; --card2:#f0f2f5; --line:#dde1e7;
+           --tx:#12161c; --tx2:#525d6b; --tx3:#7b8794;
+           --a:#0b6bcb; --a-dark:#084e94; --b:#a1701a; --c:#1f7a4d; --d:#b03a30; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--tx);
+       font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+       -webkit-text-size-adjust:100%}
+  #app{min-height:100vh;display:flex;flex-direction:column}
+
+  /* ---------- topo ---------- */
+  .topbar{display:flex;align-items:center;gap:10px;padding:14px 18px;
+          border-bottom:1px solid var(--line);position:sticky;top:0;
+          background:var(--bg);z-index:10}
+  .topbar .logo{display:flex;align-items:center;gap:9px;font-weight:700;
+                font-size:1.05rem;letter-spacing:-.01em}
+  .topbar .logo svg{width:22px;height:22px;flex:none}
+  .topbar .spacer{flex:1}
+  .topbar .user{font-size:.8rem;color:var(--tx2);margin-right:4px}
+  .topnav{display:flex;gap:2px;background:var(--card2);border-radius:9px;padding:3px;margin-left:6px}
+  .topnav button{border:none;background:transparent;color:var(--tx2);padding:6px 13px;
+                 border-radius:7px;font-size:.83rem;font-weight:700;cursor:pointer}
+  .topnav button.on{background:var(--card);color:var(--tx)}
+  .subnav{display:flex;gap:8px;margin-bottom:18px}
+  .subnav button{border:1px solid var(--line);background:var(--card);color:var(--tx2);
+                 padding:7px 14px;border-radius:999px;font-size:.83rem;font-weight:700;cursor:pointer}
+  .subnav button.on{background:var(--a);border-color:var(--a);color:#fff}
+
+  /* ---------- botões ---------- */
+  .btn{appearance:none;border:1px solid var(--line);background:var(--card);
+       color:var(--tx);border-radius:9px;padding:9px 14px;font-size:.88rem;
+       font-weight:600;cursor:pointer;display:inline-flex;align-items:center;
+       gap:6px;transition:background .12s}
+  .btn:hover{background:var(--card2)}
+  .btn:disabled{opacity:.5;cursor:default}
+  .btn-primary{background:var(--a);border-color:var(--a);color:#fff}
+  .btn-primary:hover{background:var(--a-dark)}
+  .btn-ghost{background:transparent;border-color:transparent;color:var(--tx2)}
+  .btn-ghost:hover{background:var(--card2);color:var(--tx)}
+  .btn-sm{padding:6px 10px;font-size:.8rem;border-radius:7px}
+
+  /* ---------- layout geral ---------- */
+  .main{flex:1;width:100%;max-width:760px;margin:0 auto;padding:20px 16px 60px}
+  .center-screen{flex:1;display:flex;align-items:center;justify-content:center;padding:20px}
+  h1{font-size:1.3rem;margin:0 0 4px;letter-spacing:-.01em}
+  h2{font-size:1.02rem;margin:0 0 2px}
+  .muted{color:var(--tx2);font-size:.87rem;margin:0 0 18px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;
+        padding:20px}
+  .section{margin:26px 0 8px;padding-top:18px;border-top:1px solid var(--line)}
+  .section:first-of-type{margin-top:6px;padding-top:0;border-top:none}
+  .section-title{font-size:.76rem;font-weight:700;text-transform:uppercase;
+                 letter-spacing:.06em;color:var(--tx3);margin:0 0 12px}
+
+  /* ---------- formulário ---------- */
+  .field{margin-bottom:14px}
+  .field label{display:block;font-size:.79rem;color:var(--tx2);margin-bottom:5px;
+               font-weight:600}
+  .field input, .field select, .field textarea{
+    width:100%;background:var(--card2);border:1px solid var(--line);
+    color:var(--tx);border-radius:9px;padding:10px 12px;font-size:.92rem;
+    font-family:inherit}
+  .field input:focus, .field select:focus, .field textarea:focus{
+    outline:2px solid var(--a);outline-offset:-1px}
+  .field textarea{resize:vertical;min-height:70px}
+  .row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+  @media(max-width:520px){.row2,.row3{grid-template-columns:1fr}}
+  .seg{display:flex;gap:8px}
+  .seg button{flex:1;padding:9px;border-radius:9px;border:1px solid var(--line);
+              background:var(--card2);color:var(--tx2);font-weight:700;
+              font-size:.85rem;cursor:pointer}
+  .seg button.on{background:var(--a);border-color:var(--a);color:#fff}
+
+  /* ---------- lista ---------- */
+  .toolbar{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px}
+  .toolbar input, .toolbar select{background:var(--card);border:1px solid var(--line);
+    color:var(--tx);border-radius:9px;padding:9px 12px;font-size:.87rem}
+  .toolbar input{flex:1;min-width:160px}
+  table{width:100%;border-collapse:collapse}
+  th{text-align:left;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;
+     color:var(--tx3);padding:0 12px 8px;font-weight:600}
+  td{padding:12px;background:var(--card);border-top:1px solid var(--line)}
+  tr.row td:first-child{border-radius:10px 0 0 10px}
+  tr.row td:last-child{border-radius:0 10px 10px 0}
+  tr.row{cursor:pointer}
+  tr.row:hover td{background:var(--card2)}
+  .nome-cel{font-weight:700}
+  .sub-cel{color:var(--tx3);font-size:.78rem}
+  .chev{color:var(--tx3);text-align:right}
+  .empty{padding:50px 20px;text-align:center;color:var(--tx2)}
+
+  .badge{display:inline-flex;align-items:center;font-size:.72rem;font-weight:700;
+         padding:3px 9px;border-radius:999px}
+  .badge-ativo{background:color-mix(in srgb,var(--c) 18%,transparent);color:var(--c)}
+  .badge-inativo{background:color-mix(in srgb,var(--tx3) 20%,transparent);color:var(--tx3)}
+  .badge-afastado{background:color-mix(in srgb,var(--b) 18%,transparent);color:var(--b)}
+
+  /* ---------- ficha ---------- */
+  .ficha-head{display:flex;align-items:center;gap:14px;margin-bottom:22px}
+  .avatar{width:52px;height:52px;border-radius:50%;background:var(--card2);
+          border:1px solid var(--line);display:flex;align-items:center;
+          justify-content:center;font-weight:700;font-size:1.1rem;color:var(--a);
+          flex:none}
+  .ficha-actions{display:flex;gap:8px;margin-top:24px;padding-top:18px;
+                 border-top:1px solid var(--line)}
+  .link-box{display:flex;align-items:center;gap:10px;background:var(--card2);
+            border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+  .link-box code{flex:1;overflow-x:auto;white-space:nowrap;font-size:.78rem;color:var(--tx2)}
+
+  /* ---------- turmas e sessões ---------- */
+  .list-item{background:var(--card);border:1px solid var(--line);border-radius:12px;
+             padding:14px 16px;margin-bottom:10px;cursor:pointer}
+  .list-item:hover{background:var(--card2)}
+  .list-item .top{display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+  .list-item .titulo{font-weight:700}
+  .list-item .meta{color:var(--tx3);font-size:.78rem;margin-top:3px}
+  .pill{display:inline-flex;align-items:center;gap:5px;font-size:.74rem;font-weight:700;
+        padding:3px 9px;border-radius:999px;background:var(--card2);color:var(--tx2)}
+  .dias-semana{display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap}
+  .dias-semana button{width:42px;height:42px;border-radius:9px;border:1px solid var(--line);
+                      background:var(--card2);color:var(--tx2);font-size:.78rem;font-weight:700;cursor:pointer}
+  .dias-semana button.on{background:var(--a);border-color:var(--a);color:#fff}
+  .membro-row{display:flex;align-items:center;gap:12px;padding:10px 4px;border-bottom:1px solid var(--line)}
+  .membro-row:last-child{border-bottom:none}
+  .membro-row .nome{flex:1;font-size:.9rem}
+  .checkbox-big{width:22px;height:22px;flex:none;cursor:pointer;accent-color:var(--a)}
+  .presenca-row{display:flex;align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid var(--line)}
+  .presenca-row:last-child{border-bottom:none}
+  .presenca-row .nome{flex:1;font-weight:600;font-size:.9rem}
+  .status-seg{display:flex;gap:4px}
+  .status-seg button{padding:5px 9px;border-radius:7px;border:1px solid var(--line);
+                     background:var(--card2);color:var(--tx3);font-size:.72rem;font-weight:700;cursor:pointer}
+  .status-seg button.on-presente{background:var(--c);border-color:var(--c);color:#fff}
+  .status-seg button.on-ausente{background:var(--d);border-color:var(--d);color:#fff}
+  .status-seg button.on-justificado{background:var(--b);border-color:var(--b);color:#fff}
+  .status-seg button.on-parcial{background:var(--a);border-color:var(--a);color:#fff}
+  .pse-badge{font-size:.74rem;font-weight:700;color:var(--tx3);min-width:64px;text-align:right}
+  .pse-badge.respondido{color:var(--c)}
+
+  /* ---------- toast / erro ---------- */
+  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);
+         background:var(--card);border:1px solid var(--line);color:var(--tx);
+         padding:11px 18px;border-radius:10px;font-size:.86rem;box-shadow:0 8px 24px rgba(0,0,0,.25);
+         z-index:50;max-width:90vw}
+  .toast.err{border-color:var(--d);color:var(--d)}
+  .toast.ok{border-color:var(--c);color:var(--c)}
+
+  .box{max-width:380px;width:100%}
+  .tabs{display:flex;gap:4px;background:var(--card2);border-radius:10px;padding:3px;margin-bottom:18px}
+  .tabs button{flex:1;padding:8px;border:none;background:transparent;color:var(--tx2);
+               border-radius:8px;font-weight:700;font-size:.85rem;cursor:pointer}
+  .tabs button.on{background:var(--card);color:var(--tx)}
+  code.sql{display:block;background:var(--card2);border:1px solid var(--line);
+           border-radius:10px;padding:14px;font-size:.78rem;line-height:1.6;
+           white-space:pre-wrap;word-break:break-word;color:var(--tx2);margin:14px 0}
+  .spinner{width:26px;height:26px;border-radius:50%;border:3px solid var(--line);
+           border-top-color:var(--a);animation:spin .8s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+/* =====================================================================
+   FAROL TÁTICO — v1
+   App de página única, sem etapa de build, falando direto com o Supabase.
+   ===================================================================== */
+
+const SUPABASE_URL = 'https://gtygargcfbayfbgontus.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_-5pYhC2C1QS3X6HysBHzLg_L6g9TWWs';
+
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
+  db: { schema: 'ft' }
+});
+
+const app = document.getElementById('app');
+
+/* ---------------------------- estado ---------------------------- */
+let state = {
+  view: 'loading',      // loading | auth | bootstrap | lista | ficha | turmas | turma-edit | sessoes | sessao-detail
+  aba: 'atletas',        // atletas | treinos — controla os botões de navegação do topo
+  user: null,           // usuário autenticado (auth.users)
+  usuario: null,        // linha em ft.usuarios (papel, etc.)
+  categorias: [],
+  atletas: [],
+  filtro: { busca: '', categoria: '', status: 'ativo' },
+  fichaId: null,        // null = criando; senão, id do atleta em edição
+  fichaOriginal: null,
+  fichaToken: undefined, // link do atleta: undefined = não buscou ainda, null = não tem, string = token
+  authTab: 'entrar',
+  authErro: '',
+  authCarregando: false,
+
+  // treinos
+  turmasCarregadas: false,
+  turmas: [],
+  turmaEdit: null,          // objeto em edição (novo ou existente)
+  turmaMembrosIds: new Set(),
+  buscaMembroTurma: '',
+
+  sessoesCarregadas: false,
+  sessoes: [],
+  sessaoEdit: null,         // form de nova sessão
+  sessaoAtual: null,        // sessão aberta (detalhe), com presenças carregadas
+};
+
+function escapeHtml(s){
+  if (s === null || s === undefined) return '';
+  return String(s)
+    .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')
+    .replaceAll('"','&quot;').replaceAll("'",'&#39;');
+}
+
+function toast(msg, tipo){
+  const el = document.createElement('div');
+  el.className = 'toast' + (tipo ? ' ' + tipo : '');
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 4200);
+}
+
+function calcIdade(dataNasc){
+  if (!dataNasc) return null;
+  const hoje = new Date();
+  const nasc = new Date(dataNasc + 'T00:00:00');
+  let idade = hoje.getFullYear() - nasc.getFullYear();
+  const m = hoje.getMonth() - nasc.getMonth();
+  if (m < 0 || (m === 0 && hoje.getDate() < nasc.getDate())) idade--;
+  return idade;
+}
+
+function iniciais(nome){
+  if (!nome) return '?';
+  const partes = nome.trim().split(/\s+/);
+  const a = partes[0]?.[0] || '';
+  const b = partes.length > 1 ? partes[partes.length - 1][0] : '';
+  return (a + b).toUpperCase();
+}
+
+/* ---------------------------- boot ---------------------------- */
+
+async function init(){
+  const { data: { session } } = await sb.auth.getSession();
+  state.user = session?.user || null;
+
+  sb.auth.onAuthStateChange((_evt, session) => {
+    state.user = session?.user || null;
+    boot();
+  });
+
+  await boot();
+}
+
+async function boot(){
+  if (!state.user){
+    state.view = 'auth';
+    render();
+    return;
+  }
+
+  const { data: usuario, error } = await sb
+    .from('usuarios')
+    .select('*')
+    .eq('id', state.user.id)
+    .maybeSingle();
+
+  if (error){
+    console.error(error);
+    toast('Erro ao verificar seu acesso: ' + error.message, 'err');
+  }
+
+  state.usuario = usuario || null;
+
+  if (!state.usuario || !state.usuario.ativo){
+    state.view = 'bootstrap';
+    render();
+    return;
+  }
+
+  await Promise.all([carregarCategorias(), carregarAtletas()]);
+  state.aba = 'atletas';
+  state.view = 'lista';
+  render();
+}
+
+async function carregarCategorias(){
+  const { data, error } = await sb
+    .from('categorias')
+    .select('*')
+    .order('ordem');
+  if (error){ toast('Erro ao carregar categorias: ' + error.message, 'err'); return; }
+  state.categorias = data || [];
+}
+
+async function carregarAtletas(){
+  const { data, error } = await sb
+    .from('atletas')
+    .select('*, categorias(id, nome, sexo)')
+    .order('nome');
+  if (error){ toast('Erro ao carregar atletas: ' + error.message, 'err'); return; }
+  state.atletas = data || [];
+}
+
+async function carregarTurmas(){
+  const { data, error } = await sb
+    .from('turmas')
+    .select('*, categorias(id, nome, sexo)')
+    .order('nome');
+  if (error){ toast('Erro ao carregar turmas: ' + error.message, 'err'); return; }
+  state.turmas = data || [];
+  state.turmasCarregadas = true;
+}
+
+async function carregarSessoes(){
+  const { data, error } = await sb
+    .from('v_sessao_resumo')
+    .select('*')
+    .order('data', { ascending: false })
+    .order('hora_inicio', { ascending: false })
+    .limit(40);
+  if (error){ toast('Erro ao carregar sessões: ' + error.message, 'err'); return; }
+  state.sessoes = data || [];
+  state.sessoesCarregadas = true;
+}
+
+/* ---------------------------- navegação entre abas ---------------------------- */
+
+async function irParaAba(aba){
+  state.aba = aba;
+  if (aba === 'atletas'){
+    state.view = 'lista';
+    render();
+    return;
+  }
+  // treinos: mostra a lista de sessões por padrão
+  state.view = 'sessoes';
+  render();
+  if (!state.sessoesCarregadas) await carregarSessoes();
+  if (!state.turmasCarregadas) await carregarTurmas();
+  render();
+}
+
+/* ---------------------------- autenticação ---------------------------- */
+
+function setAuthTab(tab){
+  state.authTab = tab;
+  state.authErro = '';
+  render();
+}
+
+async function handleAuthSubmit(ev){
+  ev.preventDefault();
+  const email = document.getElementById('auth-email').value.trim();
+  const senha = document.getElementById('auth-senha').value;
+
+  if (!email || !senha){
+    state.authErro = 'Preencha e-mail e senha.';
+    render();
+    return;
+  }
+
+  state.authCarregando = true;
+  state.authErro = '';
+  render();
+
+  const fn = state.authTab === 'entrar' ? 'signInWithPassword' : 'signUp';
+  const { data, error } = await sb.auth[fn]({ email, password: senha });
+
+  state.authCarregando = false;
+
+  if (error){
+    state.authErro = traduzErroAuth(error.message);
+    render();
+    return;
+  }
+
+  if (state.authTab === 'criar' && !data.session){
+    state.authErro = '';
+    toast('Conta criada. Confira seu e-mail para confirmar o acesso, se for solicitado.', 'ok');
+    render();
+    return;
+  }
+
+  state.user = data.user;
+  await boot();
+}
+
+function traduzErroAuth(msg){
+  if (/already registered/i.test(msg)) return 'Este e-mail já tem conta — tente entrar em vez de criar.';
+  if (/invalid login/i.test(msg))     return 'E-mail ou senha incorretos.';
+  if (/password.*(6|weak)/i.test(msg)) return 'A senha precisa ter pelo menos 6 caracteres.';
+  return msg;
+}
+
+async function signOut(){
+  await sb.auth.signOut();
+  state = { ...state, view: 'auth', user: null, usuario: null, atletas: [], fichaId: null };
+  render();
+}
+
+async function reverificarAcesso(){
+  toast('Verificando…');
+  await boot();
+}
+
+/* ---------------------------- ficha (criar/editar) ---------------------------- */
+
+const CAMPOS_VAZIOS = {
+  nome: '', apelido: '', sexo: '', categoria_id: '', data_nascimento: '',
+  altura_cm: '', envergadura_cm: '', alcance_ataque_cm: '', alcance_bloqueio_cm: '',
+  mao_dominante: '', lado_preferencial: '', telefone: '', email: '',
+  responsavel_nome: '', responsavel_telefone: '', status: 'ativo', observacoes: ''
+};
+
+function abrirNovaFicha(){
+  state.fichaId = null;
+  state.fichaOriginal = { ...CAMPOS_VAZIOS };
+  state.fichaToken = null; // atleta novo ainda não tem link — só existe depois de salvar
+  state.view = 'ficha';
+  render();
+}
+
+async function abrirFicha(id){
+  const at = state.atletas.find(a => a.id === id);
+  if (!at) return;
+  state.fichaId = id;
+  state.fichaOriginal = { ...CAMPOS_VAZIOS, ...at };
+  state.fichaToken = undefined; // undefined = buscando
+  state.view = 'ficha';
+  render();
+
+  const { data, error } = await sb
+    .from('tokens_atleta')
+    .select('token')
+    .eq('atleta_id', id)
+    .eq('revogado', false)
+    .limit(1)
+    .maybeSingle();
+  if (error){ console.error(error); state.fichaToken = null; render(); return; }
+  state.fichaToken = data?.token || null;
+  render();
+}
+
+function linkDoAtleta(token){
+  return new URL('atleta.html?t=' + encodeURIComponent(token), location.href).toString();
+}
+
+async function copiarLinkAtleta(){
+  if (!state.fichaToken) return;
+  const link = linkDoAtleta(state.fichaToken);
+  try {
+    await navigator.clipboard.writeText(link);
+    toast('Link copiado.', 'ok');
+  } catch {
+    toast(link); // navegador sem permissão de clipboard: mostra o link pra copiar na mão
+  }
+}
+
+function voltarParaLista(){
+  state.view = 'lista';
+  state.fichaId = null;
+  render();
+}
+
+function lerFormFicha(){
+  const g = (id) => document.getElementById(id)?.value?.trim() ?? '';
+  const num = (v) => v === '' ? null : Number(v);
+  return {
+    nome: g('f-nome'),
+    apelido: g('f-apelido') || null,
+    sexo: state.fichaOriginal.sexo,
+    categoria_id: g('f-categoria') ? Number(g('f-categoria')) : null,
+    data_nascimento: g('f-nascimento') || null,
+    altura_cm: num(g('f-altura')),
+    envergadura_cm: num(g('f-envergadura')),
+    alcance_ataque_cm: num(g('f-alcance-at')),
+    alcance_bloqueio_cm: num(g('f-alcance-bl')),
+    mao_dominante: g('f-mao') || null,
+    lado_preferencial: g('f-lado') || null,
+    telefone: g('f-telefone') || null,
+    email: g('f-email') || null,
+    responsavel_nome: g('f-resp-nome') || null,
+    responsavel_telefone: g('f-resp-tel') || null,
+    status: state.fichaOriginal.status,
+    observacoes: g('f-obs') || null,
+  };
+}
+
+// O render() reconstrói a ficha inteira a partir de state.fichaOriginal.
+// Sem isto, clicar em Sexo ou Status depois de já ter digitado nome,
+// telefone etc. apagaria tudo que foi digitado — porque o HTML novo viria
+// do estado antigo, não do que está na tela no momento do clique.
+function sincronizarFichaDoDom(){
+  const f = state.fichaOriginal;
+  const g = (id) => document.getElementById(id);
+  const ids = {
+    nome: 'f-nome', apelido: 'f-apelido', data_nascimento: 'f-nascimento',
+    categoria_id: 'f-categoria', altura_cm: 'f-altura', envergadura_cm: 'f-envergadura',
+    alcance_ataque_cm: 'f-alcance-at', alcance_bloqueio_cm: 'f-alcance-bl',
+    mao_dominante: 'f-mao', lado_preferencial: 'f-lado', telefone: 'f-telefone',
+    email: 'f-email', responsavel_nome: 'f-resp-nome', responsavel_telefone: 'f-resp-tel',
+    observacoes: 'f-obs',
+  };
+  for (const campo in ids){
+    const el = g(ids[campo]);
+    if (el) f[campo] = el.value;
+  }
+}
+
+function setSexoFicha(sexo){
+  sincronizarFichaDoDom();
+  state.fichaOriginal.sexo = sexo;
+  state.fichaOriginal.categoria_id = ''; // categoria depende do sexo, reseta
+  render();
+}
+
+function setStatusFicha(status){
+  sincronizarFichaDoDom();
+  state.fichaOriginal.status = status;
+  render();
+}
+
+async function salvarFicha(ev){
+  ev.preventDefault();
+  const dados = lerFormFicha();
+
+  if (!dados.nome){ toast('O nome é obrigatório.', 'err'); return; }
+  if (!dados.sexo){ toast('Selecione o sexo do atleta.', 'err'); return; }
+
+  const btn = document.getElementById('btn-salvar-ficha');
+  if (btn){ btn.disabled = true; btn.textContent = 'Salvando…'; }
+
+  let resp;
+  if (state.fichaId){
+    resp = await sb.from('atletas').update(dados).eq('id', state.fichaId);
+  } else {
+    resp = await sb.from('atletas').insert(dados);
+  }
+
+  if (resp.error){
+    toast('Não foi possível salvar: ' + resp.error.message, 'err');
+    if (btn){ btn.disabled = false; btn.textContent = 'Salvar'; }
+    return;
+  }
+
+  toast('Atleta salvo.', 'ok');
+  await carregarAtletas();
+  voltarParaLista();
+}
+
+/* ---------------------------- turmas ---------------------------- */
+
+const DIAS_SEMANA = [['seg','Seg'],['ter','Ter'],['qua','Qua'],['qui','Qui'],['sex','Sex'],['sab','Sáb'],['dom','Dom']];
+
+function abrirNovaTurma(){
+  state.turmaEdit = { id: null, nome: '', categoria_id: '', dias: new Set(), horario_inicio: '', horario_fim: '', local: '', ativo: true };
+  state.turmaMembrosIds = new Set();
+  state.buscaMembroTurma = '';
+  state.view = 'turma-edit';
+  render();
+}
+
+async function abrirTurma(id){
+  const t = state.turmas.find(x => x.id === id);
+  if (!t) return;
+  state.turmaEdit = {
+    id: t.id, nome: t.nome, categoria_id: t.categoria_id || '',
+    dias: new Set(t.dias_semana || []), horario_inicio: t.horario_inicio || '',
+    horario_fim: t.horario_fim || '', local: t.local || '', ativo: t.ativo,
+  };
+  state.buscaMembroTurma = '';
+  state.view = 'turma-edit';
+  render();
+
+  const { data, error } = await sb.from('turma_atletas').select('atleta_id').eq('turma_id', id).is('ate', null);
+  if (error){ toast('Erro ao carregar membros: ' + error.message, 'err'); return; }
+  state.turmaMembrosIds = new Set((data || []).map(r => r.atleta_id));
+  render();
+}
+
+function voltarParaTurmas(){
+  state.view = 'turmas';
+  state.turmaEdit = null;
+  render();
+}
+
+// Mesma lógica de sincronizarFichaDoDom: qualquer clique que force um
+// re-render (dia da semana, membro) precisa salvar antes os campos de
+// texto livre, senão eles somem da tela.
+function sincronizarTurmaDoDom(){
+  const t = state.turmaEdit;
+  const g = (id) => document.getElementById(id);
+  if (g('t-nome'))     t.nome = g('t-nome').value;
+  if (g('t-categoria'))t.categoria_id = g('t-categoria').value;
+  if (g('t-hi'))       t.horario_inicio = g('t-hi').value;
+  if (g('t-hf'))       t.horario_fim = g('t-hf').value;
+  if (g('t-local'))    t.local = g('t-local').value;
+}
+
+function toggleDiaTurma(dia){
+  sincronizarTurmaDoDom();
+  const s = state.turmaEdit.dias;
+  s.has(dia) ? s.delete(dia) : s.add(dia);
+  render();
+}
+
+function atualizarBuscaMembro(valor){
+  sincronizarTurmaDoDom();
+  state.buscaMembroTurma = valor;
+  render();
+}
+
+async function salvarTurma(ev){
+  ev.preventDefault();
+  const t = state.turmaEdit;
+  if (!t.nome){ toast('Dá um nome pra turma.', 'err'); return; }
+
+  const dados = {
+    nome: t.nome,
+    categoria_id: t.categoria_id ? Number(t.categoria_id) : null,
+    dias_semana: Array.from(t.dias),
+    horario_inicio: t.horario_inicio || null,
+    horario_fim: t.horario_fim || null,
+    local: t.local || null,
+    ativo: t.ativo,
+  };
+
+  let resp;
+  if (t.id){
+    resp = await sb.from('turmas').update(dados).eq('id', t.id);
+  } else {
+    resp = await sb.from('turmas').insert(dados).select().single();
+  }
+
+  if (resp.error){ toast('Não foi possível salvar: ' + resp.error.message, 'err'); return; }
+
+  toast('Turma salva.', 'ok');
+  await carregarTurmas();
+
+  if (!t.id){
+    // turma nova: agora que ela existe, reabre já em modo edição pra liberar a lista de membros
+    await abrirTurma(resp.data.id);
+  } else {
+    render();
+  }
+}
+
+// Toggle otimista: atualiza a tela na hora e só depois confirma no banco.
+// Se der erro, desfaz e avisa — melhor que travar o clique esperando a rede.
+async function toggleMembroTurma(atletaId){
+  const turmaId = state.turmaEdit.id;
+  const estava = state.turmaMembrosIds.has(atletaId);
+
+  sincronizarTurmaDoDom();
+  estava ? state.turmaMembrosIds.delete(atletaId) : state.turmaMembrosIds.add(atletaId);
+  render();
+
+  const resp = estava
+    ? await sb.from('turma_atletas').update({ ate: new Date().toISOString().slice(0,10) })
+        .eq('turma_id', turmaId).eq('atleta_id', atletaId).is('ate', null)
+    : await sb.from('turma_atletas')
+        .upsert({ turma_id: turmaId, atleta_id: atletaId, ate: null, desde: new Date().toISOString().slice(0,10) },
+                { onConflict: 'turma_id,atleta_id' });
+
+  if (resp.error){
+    toast('Não deu pra atualizar: ' + resp.error.message, 'err');
+    estava ? state.turmaMembrosIds.add(atletaId) : state.turmaMembrosIds.delete(atletaId);
+    render();
+  }
+}
+
+/* ---------------------------- sessões ---------------------------- */
+
+function abrirNovaSessao(){
+  const hoje = new Date().toISOString().slice(0,10);
+  state.sessaoEdit = {
+    data: hoje, hora_inicio: '', duracao_min: 90, tipo: 'tecnico',
+    turma_id: '', local: '', objetivo: '', conteudo_trabalhado: '',
+  };
+  state.view = 'sessao-edit';
+  render();
+}
+
+function voltarParaSessoes(){
+  state.view = 'sessoes';
+  state.sessaoEdit = null;
+  state.sessaoAtual = null;
+  render();
+}
+
+function sincronizarSessaoDoDom(){
+  const s = state.sessaoEdit;
+  const g = (id) => document.getElementById(id);
+  if (g('s-data'))       s.data = g('s-data').value;
+  if (g('s-hora'))       s.hora_inicio = g('s-hora').value;
+  if (g('s-duracao'))    s.duracao_min = g('s-duracao').value;
+  if (g('s-turma'))      s.turma_id = g('s-turma').value;
+  if (g('s-local'))      s.local = g('s-local').value;
+  if (g('s-objetivo'))   s.objetivo = g('s-objetivo').value;
+  if (g('s-conteudo'))   s.conteudo_trabalhado = g('s-conteudo').value;
+}
+
+function setTipoSessao(tipo){
+  sincronizarSessaoDoDom();
+  state.sessaoEdit.tipo = tipo;
+  render();
+}
+
+async function salvarNovaSessao(ev){
+  ev.preventDefault();
+  const s = state.sessaoEdit;
+  if (!s.data){ toast('Escolhe a data.', 'err'); return; }
+  if (!s.duracao_min){ toast('Preenche a duração.', 'err'); return; }
+
+  const dados = {
+    data: s.data,
+    hora_inicio: s.hora_inicio || null,
+    duracao_min: Number(s.duracao_min),
+    tipo: s.tipo,
+    turma_id: s.turma_id || null,
+    local: s.local || null,
+    objetivo: s.objetivo || null,
+    conteudo_trabalhado: s.conteudo_trabalhado || null,
+  };
+
+  const resp = await sb.from('sessoes').insert(dados).select().single();
+  if (resp.error){ toast('Não foi possível salvar: ' + resp.error.message, 'err'); return; }
+
+  toast(dados.turma_id ? 'Sessão criada — presença da turma preenchida sozinha.' : 'Sessão criada.', 'ok');
+  await carregarSessoes();
+  await abrirSessaoDetalhe(resp.data.id);
+}
+
+async function abrirSessaoDetalhe(id){
+  state.view = 'sessao-detail';
+  state.sessaoAtual = { id, carregando: true };
+  render();
+
+  const [{ data: sessao, error: e1 }, { data: presencas, error: e2 }, { data: pses, error: e3 }] = await Promise.all([
+    sb.from('sessoes').select('*, turmas(nome)').eq('id', id).single(),
+    sb.from('presencas').select('*, atletas(id, nome, apelido)').eq('sessao_id', id),
+    sb.from('pse_sessao').select('atleta_id, pse').eq('sessao_id', id),
+  ]);
+
+  if (e1 || e2 || e3){
+    toast('Erro ao abrir sessão: ' + (e1||e2||e3).message, 'err');
+    return;
+  }
+
+  const pseMap = Object.fromEntries((pses || []).map(p => [p.atleta_id, p.pse]));
+  state.sessaoAtual = {
+    id, sessao,
+    presencas: (presencas || [])
+      .map(p => ({ ...p, pse: pseMap[p.atleta_id] ?? null }))
+      .sort((a,b) => (a.atletas?.nome || '').localeCompare(b.atletas?.nome || '')),
+  };
+  render();
+}
+
+async function atualizarStatusPresenca(presencaId, status){
+  // otimista: muda na tela primeiro
+  const p = state.sessaoAtual.presencas.find(x => x.id === presencaId);
+  if (!p) return;
+  const anterior = p.status;
+  p.status = status;
+  render();
+
+  const resp = await sb.from('presencas').update({ status }).eq('id', presencaId);
+  if (resp.error){
+    toast('Não deu pra atualizar: ' + resp.error.message, 'err');
+    p.status = anterior;
+    render();
+  }
+}
+
+async function adicionarAtletaNaSessao(atletaId){
+  if (!atletaId) return;
+  const s = state.sessaoAtual;
+  if (s.presencas.some(p => p.atleta_id === atletaId)) return;
+
+  const resp = await sb.from('presencas')
+    .insert({ sessao_id: s.id, atleta_id: atletaId, status: 'presente', duracao_individual_min: s.sessao.duracao_min })
+    .select('*, atletas(id, nome, apelido)').single();
+
+  if (resp.error){ toast('Não deu pra adicionar: ' + resp.error.message, 'err'); return; }
+
+  s.presencas.push({ ...resp.data, pse: null });
+  s.presencas.sort((a,b) => (a.atletas?.nome || '').localeCompare(b.atletas?.nome || ''));
+  render();
+}
+
+/* ---------------------------- lista: filtro ---------------------------- */
+
+function atualizarFiltro(campo, valor){
+  state.filtro[campo] = valor;
+  render();
+}
+
+function atletasFiltrados(){
+  const busca = state.filtro.busca.toLowerCase();
+  return state.atletas.filter(a => {
+    if (state.filtro.status && a.status !== state.filtro.status) return false;
+    if (state.filtro.categoria && String(a.categoria_id) !== state.filtro.categoria) return false;
+    if (busca && !(a.nome || '').toLowerCase().includes(busca) &&
+                 !(a.apelido || '').toLowerCase().includes(busca)) return false;
+    return true;
+  });
+}
+
+/* ============================== RENDER ============================== */
+
+function render(){
+  if (state.view === 'loading')       return renderLoading();
+  if (state.view === 'auth')          return renderAuth();
+  if (state.view === 'bootstrap')     return renderBootstrap();
+  if (state.view === 'lista')         return renderLista();
+  if (state.view === 'ficha')         return renderFicha();
+  if (state.view === 'turmas')        return renderTurmas();
+  if (state.view === 'turma-edit')    return renderTurmaEdit();
+  if (state.view === 'sessoes')       return renderSessoes();
+  if (state.view === 'sessao-edit')   return renderSessaoEdit();
+  if (state.view === 'sessao-detail') return renderSessaoDetail();
+}
+
+function logoSvg(){
+  return `<svg viewBox="0 0 64 64" fill="none">
+    <circle cx="32" cy="20" r="9" fill="var(--b)"/>
+    <path d="M14 58 L26 26 L38 26 L50 58 Z" fill="var(--a)"/>
+  </svg>`;
+}
+
+function renderLoading(){
+  app.innerHTML = `<div class="center-screen"><div class="spinner"></div></div>`;
+}
+
+function renderTopbar(){
+  return `
+    <div class="topbar">
+      <div class="logo">${logoSvg()} Farol Tático</div>
+      ${state.user && state.usuario ? `
+        <nav class="topnav">
+          <button class="${state.aba==='atletas'?'on':''}" onclick="irParaAba('atletas')">Atletas</button>
+          <button class="${state.aba==='treinos'?'on':''}" onclick="irParaAba('treinos')">Treinos</button>
+        </nav>
+      ` : ''}
+      <div class="spacer"></div>
+      ${state.user ? `
+        <span class="user">${escapeHtml(state.usuario?.nome || state.user.email)}</span>
+        <button class="btn btn-ghost btn-sm" onclick="signOut()">Sair</button>
+      ` : ''}
+    </div>`;
+}
+
+function renderSubnavTreinos(){
+  return `
+    <div class="subnav">
+      <button class="${state.view.startsWith('sessao')?'on':''}" onclick="mostrarSessoes()">Sessões</button>
+      <button class="${state.view.startsWith('turma')?'on':''}" onclick="mostrarTurmas()">Turmas</button>
+    </div>`;
+}
+
+async function mostrarSessoes(){
+  state.view = 'sessoes';
+  render();
+  if (!state.sessoesCarregadas) { await carregarSessoes(); render(); }
+}
+
+async function mostrarTurmas(){
+  state.view = 'turmas';
+  render();
+  if (!state.turmasCarregadas) { await carregarTurmas(); render(); }
+}
+
+function renderAuth(){
+  app.innerHTML = `
+    ${renderTopbar()}
+    <div class="center-screen">
+      <div class="card box">
+        <h1>Entrar no Farol Tático</h1>
+        <p class="muted">Sistema de performance da comissão técnica.</p>
+        <div class="tabs">
+          <button class="${state.authTab==='entrar'?'on':''}" onclick="setAuthTab('entrar')">Entrar</button>
+          <button class="${state.authTab==='criar'?'on':''}" onclick="setAuthTab('criar')">Criar conta</button>
+        </div>
+        <form onsubmit="handleAuthSubmit(event)">
+          <div class="field">
+            <label>E-mail</label>
+            <input id="auth-email" type="email" autocomplete="email" required>
+          </div>
+          <div class="field">
+            <label>Senha</label>
+            <input id="auth-senha" type="password" autocomplete="${state.authTab==='entrar'?'current-password':'new-password'}" minlength="6" required>
+          </div>
+          ${state.authErro ? `<p style="color:var(--d);font-size:.85rem;margin:-4px 0 14px">${escapeHtml(state.authErro)}</p>` : ''}
+          <button class="btn btn-primary" style="width:100%;justify-content:center" ${state.authCarregando?'disabled':''}>
+            ${state.authCarregando ? 'Aguarde…' : (state.authTab==='entrar' ? 'Entrar' : 'Criar conta')}
+          </button>
+        </form>
+      </div>
+    </div>`;
+}
+
+function renderBootstrap(){
+  const email = state.user.email;
+  app.innerHTML = `
+    ${renderTopbar()}
+    <div class="main">
+      <div class="card">
+        <h1>Quase lá</h1>
+        <p class="muted">Sua conta foi criada, mas ainda não tem liberação de acesso ao sistema.</p>
+        <p>Abra o <b>SQL Editor</b> do seu projeto Supabase e rode o comando abaixo <b>uma única vez</b>
+           para se tornar administrador:</p>
+        <code class="sql">insert into ft.usuarios (id, nome, email, papel)
+select id, '${escapeHtml(state.usuario?.nome || 'Comissão Técnica')}', email, 'admin'
+from auth.users
+where email = '${escapeHtml(email)}';</code>
+        <p class="muted">Depois de rodar, volta aqui e clica no botão abaixo.</p>
+        <button class="btn btn-primary" onclick="reverificarAcesso()">Já rodei — verificar de novo</button>
+      </div>
+    </div>`;
+}
+
+function renderLista(){
+  const lista = atletasFiltrados();
+  const opcoesCategoria = state.categorias
+    .map(c => `<option value="${c.id}">${escapeHtml(c.nome)} (${c.sexo})</option>`).join('');
+
+  app.innerHTML = `
+    ${renderTopbar()}
+    <div class="main">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
+        <h1 style="flex:1">Atletas</h1>
+        <button class="btn btn-primary" onclick="abrirNovaFicha()">+ Novo atleta</button>
+      </div>
+      <p class="muted">${state.atletas.length} cadastrado${state.atletas.length===1?'':'s'}</p>
+
+      <div class="toolbar">
+        <input placeholder="Buscar por nome ou apelido…" value="${escapeHtml(state.filtro.busca)}"
+               oninput="atualizarFiltro('busca', this.value)">
+        <select onchange="atualizarFiltro('categoria', this.value)">
+          <option value="">Todas as categorias</option>
+          ${opcoesCategoria}
+        </select>
+        <select onchange="atualizarFiltro('status', this.value)">
+          <option value="ativo" ${state.filtro.status==='ativo'?'selected':''}>Ativos</option>
+          <option value="inativo" ${state.filtro.status==='inativo'?'selected':''}>Inativos</option>
+          <option value="afastado" ${state.filtro.status==='afastado'?'selected':''}>Afastados</option>
+          <option value="" ${state.filtro.status===''?'selected':''}>Todos</option>
+        </select>
+      </div>
+
+      ${lista.length === 0 ? `
+        <div class="empty">Nenhum atleta encontrado com esse filtro.</div>
+      ` : `
+        <table>
+          <thead><tr><th>Nome</th><th>Categoria</th><th>Idade</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            ${lista.map(a => {
+              const idade = calcIdade(a.data_nascimento);
+              return `
+                <tr class="row" onclick="abrirFicha('${a.id}')">
+                  <td>
+                    <div class="nome-cel">${escapeHtml(a.nome)}</div>
+                    ${a.apelido ? `<div class="sub-cel">"${escapeHtml(a.apelido)}"</div>` : ''}
+                  </td>
+                  <td>${a.categorias ? escapeHtml(a.categorias.nome) : '—'}</td>
+                  <td>${idade !== null ? idade + ' anos' : '—'}</td>
+                  <td><span class="badge badge-${a.status}">${a.status}</span></td>
+                  <td class="chev">›</td>
+                </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      `}
+    </div>`;
+}
+
+function renderFicha(){
+  const f = state.fichaOriginal;
+  const editando = !!state.fichaId;
+  const categoriasDoSexo = state.categorias.filter(c => c.sexo === f.sexo);
+
+  app.innerHTML = `
+    ${renderTopbar()}
+    <div class="main">
+      <button class="btn btn-ghost btn-sm" style="margin-bottom:14px" onclick="voltarParaLista()">← Voltar</button>
+
+      <div class="ficha-head">
+        <div class="avatar">${iniciais(f.nome)}</div>
+        <div>
+          <h1>${editando ? (f.nome || 'Atleta') : 'Novo atleta'}</h1>
+          <p class="muted" style="margin:0">${editando ? 'Editando cadastro' : 'Preencha os dados abaixo'}</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <form onsubmit="salvarFicha(event)">
+
+          <div class="section-title">Dados básicos</div>
+          <div class="field">
+            <label>Nome completo *</label>
+            <input id="f-nome" value="${escapeHtml(f.nome)}" required>
+          </div>
+          <div class="row2">
+            <div class="field">
+              <label>Apelido</label>
+              <input id="f-apelido" value="${escapeHtml(f.apelido)}">
+            </div>
+            <div class="field">
+              <label>Data de nascimento</label>
+              <input id="f-nascimento" type="date" value="${f.data_nascimento || ''}">
+            </div>
+          </div>
+          <div class="field">
+            <label>Sexo *</label>
+            <div class="seg">
+              <button type="button" class="${f.sexo==='F'?'on':''}" onclick="setSexoFicha('F')">Feminino</button>
+              <button type="button" class="${f.sexo==='M'?'on':''}" onclick="setSexoFicha('M')">Masculino</button>
+            </div>
+          </div>
+          <div class="field">
+            <label>Categoria</label>
+            <select id="f-categoria" ${!f.sexo ? 'disabled' : ''}>
+              <option value="">${f.sexo ? 'Selecione…' : 'Escolha o sexo primeiro'}</option>
+              ${categoriasDoSexo.map(c => `
+                <option value="${c.id}" ${String(f.categoria_id)===String(c.id)?'selected':''}>${escapeHtml(c.nome)}</option>
+              `).join('')}
+            </select>
+          </div>
+          <div class="field">
+            <label>Status</label>
+            <div class="seg">
+              <button type="button" class="${f.status==='ativo'?'on':''}" onclick="setStatusFicha('ativo')">Ativo</button>
+              <button type="button" class="${f.status==='afastado'?'on':''}" onclick="setStatusFicha('afastado')">Afastado</button>
+              <button type="button" class="${f.status==='inativo'?'on':''}" onclick="setStatusFicha('inativo')">Inativo</button>
+            </div>
+          </div>
+
+          <div class="section">
+            <div class="section-title">Antropometria</div>
+            <div class="row2">
+              <div class="field"><label>Altura (cm)</label>
+                <input id="f-altura" type="number" step="0.1" value="${f.altura_cm ?? ''}"></div>
+              <div class="field"><label>Envergadura (cm)</label>
+                <input id="f-envergadura" type="number" step="0.1" value="${f.envergadura_cm ?? ''}"></div>
+            </div>
+            <div class="row2">
+              <div class="field"><label>Alcance de ataque (cm)</label>
+                <input id="f-alcance-at" type="number" step="0.1" value="${f.alcance_ataque_cm ?? ''}"></div>
+              <div class="field"><label>Alcance de bloqueio (cm)</label>
+                <input id="f-alcance-bl" type="number" step="0.1" value="${f.alcance_bloqueio_cm ?? ''}"></div>
+            </div>
+            <div class="row2">
+              <div class="field"><label>Mão dominante</label>
+                <select id="f-mao">
+                  <option value="">—</option>
+                  <option value="destro" ${f.mao_dominante==='destro'?'selected':''}>Destro</option>
+                  <option value="canhoto" ${f.mao_dominante==='canhoto'?'selected':''}>Canhoto</option>
+                </select></div>
+              <div class="field"><label>Lado preferencial</label>
+                <select id="f-lado">
+                  <option value="">—</option>
+                  <option value="direita" ${f.lado_preferencial==='direita'?'selected':''}>Direita</option>
+                  <option value="esquerda" ${f.lado_preferencial==='esquerda'?'selected':''}>Esquerda</option>
+                  <option value="ambos" ${f.lado_preferencial==='ambos'?'selected':''}>Ambos</option>
+                </select></div>
+            </div>
+          </div>
+
+          <div class="section">
+            <div class="section-title">Contato</div>
+            <div class="row2">
+              <div class="field"><label>Telefone</label>
+                <input id="f-telefone" value="${escapeHtml(f.telefone)}"></div>
+              <div class="field"><label>E-mail</label>
+                <input id="f-email" type="email" value="${escapeHtml(f.email)}"></div>
+            </div>
+          </div>
+
+          <div class="section">
+            <div class="section-title">Responsável (se menor de idade)</div>
+            <div class="row2">
+              <div class="field"><label>Nome do responsável</label>
+                <input id="f-resp-nome" value="${escapeHtml(f.responsavel_nome)}"></div>
+              <div class="field"><label>Telefone do responsável</label>
+                <input id="f-resp-tel" value="${escapeHtml(f.responsavel_telefone)}"></div>
+            </div>
+          </div>
+
+          <div class="section">
+            <div class="section-title">Observações</div>
+            <div class="field">
+              <textarea id="f-obs">${escapeHtml(f.observacoes)}</textarea>
+            </div>
+          </div>
+
+          ${editando ? `
+          <div class="section">
+            <div class="section-title">Link do atleta</div>
+            <p class="muted" style="margin-top:-4px">Mande esse endereço uma vez pelo WhatsApp. É fixo — não muda, o atleta
+              abre todo dia pra responder antes e depois do treino, sem precisar de login.</p>
+            ${state.fichaToken === undefined ? `<p class="muted">Carregando…</p>` :
+              state.fichaToken ? `
+                <div class="link-box">
+                  <code>${escapeHtml(linkDoAtleta(state.fichaToken))}</code>
+                  <button type="button" class="btn btn-sm" onclick="copiarLinkAtleta()">Copiar</button>
+                </div>
+              ` : `<p class="muted">Não encontrei o link deste atleta.</p>`}
+          </div>` : ''}
+
+          <div class="ficha-actions">
+            <button type="submit" id="btn-salvar-ficha" class="btn btn-primary">Salvar</button>
+            <button type="button" class="btn btn-ghost" onclick="voltarParaLista()">Cancelar</button>
+          </div>
+        </form>
+      </div>
+    </div>`;
+}
+
+/* ---------------------------- render: turmas ---------------------------- */
+
+function renderTurmas(){
+  app.innerHTML = `
+    ${renderTopbar()}
+    <div class="main">
+      ${renderSubnavTreinos()}
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+        <h1 style="flex:1">Turmas</h1>
+        <button class="btn btn-primary" onclick="abrirNovaTurma()">+ Nova turma</button>
+      </div>
+
+      ${state.turmas.length === 0 ? `<div class="empty">Nenhuma turma cadastrada ainda.</div>` :
+        state.turmas.map(t => `
+          <div class="list-item" onclick="abrirTurma('${t.id}')">
+            <div class="top">
+              <div class="titulo">${escapeHtml(t.nome)}</div>
+              ${!t.ativo ? `<span class="pill">inativa</span>` : ''}
+            </div>
+            <div class="meta">
+              ${t.categorias ? escapeHtml(t.categorias.nome) + ' (' + t.categorias.sexo + ')' : 'Sem categoria'}
+              ${t.dias_semana?.length ? ' · ' + t.dias_semana.map(d => d[0].toUpperCase()+d.slice(1)).join(', ') : ''}
+              ${t.horario_inicio ? ' · ' + t.horario_inicio.slice(0,5) : ''}
+              ${t.local ? ' · ' + escapeHtml(t.local) : ''}
+            </div>
+          </div>
+        `).join('')}
+    </div>`;
+}
+
+function renderTurmaEdit(){
+  const t = state.turmaEdit;
+  const editando = !!t.id;
+  const busca = state.buscaMembroTurma.toLowerCase();
+  const atletasVisiveis = state.atletas
+    .filter(a => a.status === 'ativo')
+    .filter(a => !busca || (a.nome||'').toLowerCase().includes(busca));
+
+  app.innerHTML = `
+    ${renderTopbar()}
+    <div class="main">
+      <button class="btn btn-ghost btn-sm" style="margin-bottom:14px" onclick="voltarParaTurmas()">← Voltar</button>
+      <h1>${editando ? escapeHtml(t.nome || 'Turma') : 'Nova turma'}</h1>
+      <p class="muted" style="margin-bottom:20px">${editando ? 'Editando turma' : 'Depois de salvar você adiciona os atletas'}</p>
+
+      <div class="card">
+        <form onsubmit="salvarTurma(event)">
+          <div class="field">
+            <label>Nome da turma *</label>
+            <input id="t-nome" value="${escapeHtml(t.nome)}" required>
+          </div>
+          <div class="row2">
+            <div class="field">
+              <label>Categoria</label>
+              <select id="t-categoria">
+                <option value="">—</option>
+                ${state.categorias.map(c => `<option value="${c.id}" ${String(t.categoria_id)===String(c.id)?'selected':''}>${escapeHtml(c.nome)} (${c.sexo})</option>`).join('')}
+              </select>
+            </div>
+            <div class="field">
+              <label>Local</label>
+              <input id="t-local" value="${escapeHtml(t.local)}">
+            </div>
+          </div>
+          <div class="field">
+            <label>Dias de treino</label>
+            <div class="dias-semana">
+              ${DIAS_SEMANA.map(([c,n]) => `<button type="button" class="${t.dias.has(c)?'on':''}" onclick="toggleDiaTurma('${c}')">${n}</button>`).join('')}
+            </div>
+          </div>
+          <div class="row2">
+            <div class="field"><label>Horário de início</label><input id="t-hi" type="time" value="${t.horario_inicio}"></div>
+            <div class="field"><label>Horário de fim</label><input id="t-hf" type="time" value="${t.horario_fim}"></div>
+          </div>
+          <div class="ficha-actions">
+            <button type="submit" class="btn btn-primary">${editando ? 'Salvar' : 'Salvar e adicionar atletas'}</button>
+            <button type="button" class="btn btn-ghost" onclick="voltarParaTurmas()">Cancelar</button>
+          </div>
+        </form>
+      </div>
+
+      ${editando ? `
+        <div class="section-title" style="margin-top:26px">Atletas na turma (${state.turmaMembrosIds.size})</div>
+        <input placeholder="Buscar atleta…" value="${escapeHtml(state.buscaMembroTurma)}"
+               oninput="atualizarBuscaMembro(this.value)"
+               style="width:100%;background:var(--card);border:1px solid var(--line);color:var(--tx);
+                      border-radius:9px;padding:9px 12px;font-size:.87rem;margin-bottom:10px">
+        <div class="card" style="padding:6px 16px">
+          ${atletasVisiveis.length === 0 ? `<div class="empty">Nenhum atleta encontrado.</div>` :
+            atletasVisiveis.map(a => `
+              <div class="membro-row">
+                <input type="checkbox" class="checkbox-big" ${state.turmaMembrosIds.has(a.id)?'checked':''}
+                       onchange="toggleMembroTurma('${a.id}')">
+                <span class="nome">${escapeHtml(a.nome)}</span>
+                <span class="sub-cel">${a.categorias ? escapeHtml(a.categorias.nome) : ''}</span>
+              </div>
+            `).join('')}
+        </div>
+      ` : ''}
+    </div>`;
+}
+
+/* ---------------------------- render: sessões ---------------------------- */
+
+function renderSessoes(){
+  app.innerHTML = `
+    ${renderTopbar()}
+    <div class="main">
+      ${renderSubnavTreinos()}
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+        <h1 style="flex:1">Sessões</h1>
+        <button class="btn btn-primary" onclick="abrirNovaSessao()">+ Nova sessão</button>
+      </div>
+
+      ${state.sessoes.length === 0 ? `<div class="empty">Nenhuma sessão registrada ainda.</div>` :
+        state.sessoes.map(s => `
+          <div class="list-item" onclick="abrirSessaoDetalhe('${s.id}')">
+            <div class="top">
+              <div class="titulo">${new Date(s.data+'T00:00:00').toLocaleDateString('pt-BR', {day:'2-digit',month:'2-digit'})} · ${escapeHtml(s.tipo)}</div>
+              <span class="pill">${s.presentes} presente${s.presentes===1?'':'s'}</span>
+            </div>
+            <div class="meta">
+              ${s.turma_nome ? escapeHtml(s.turma_nome) : 'Sessão avulsa'}
+              ${s.local ? ' · ' + escapeHtml(s.local) : ''} · ${s.duracao_min} min
+              · PSE: ${s.pse_respondidas}/${s.presentes} respondida${s.pse_respondidas===1?'':'s'}
+            </div>
+          </div>
+        `).join('')}
+    </div>`;
+}
+
+function renderSessaoEdit(){
+  const s = state.sessaoEdit;
+  app.innerHTML = `
+    ${renderTopbar()}
+    <div class="main">
+      <button class="btn btn-ghost btn-sm" style="margin-bottom:14px" onclick="voltarParaSessoes()">← Voltar</button>
+      <h1>Nova sessão</h1>
+      <p class="muted" style="margin-bottom:20px">Se escolher uma turma, a presença de todo mundo já entra preenchida.</p>
+
+      <div class="card">
+        <form onsubmit="salvarNovaSessao(event)">
+          <div class="row2">
+            <div class="field"><label>Data *</label><input id="s-data" type="date" value="${s.data}" required></div>
+            <div class="field"><label>Horário</label><input id="s-hora" type="time" value="${s.hora_inicio}"></div>
+          </div>
+          <div class="row2">
+            <div class="field"><label>Duração (min) *</label><input id="s-duracao" type="number" min="1" value="${s.duracao_min}" required></div>
+            <div class="field"><label>Local</label><input id="s-local" value="${escapeHtml(s.local)}"></div>
+          </div>
+          <div class="field">
+            <label>Tipo</label>
+            <div class="seg">
+              ${[['tecnico','Técnico'],['tatico','Tático'],['fisico','Físico'],['jogo_treino','Jogo-treino'],['competicao','Competição'],['recuperativo','Recuperativo']]
+                .map(([c,n]) => `<button type="button" class="${s.tipo===c?'on':''}" onclick="setTipoSessao('${c}')">${n}</button>`).join('')}
+            </div>
+          </div>
+          <div class="field">
+            <label>Turma</label>
+            <select id="s-turma">
+              <option value="">Nenhuma (sessão avulsa)</option>
+              ${state.turmas.filter(t=>t.ativo).map(t => `<option value="${t.id}" ${s.turma_id===t.id?'selected':''}>${escapeHtml(t.nome)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field"><label>Objetivo</label><input id="s-objetivo" value="${escapeHtml(s.objetivo)}"></div>
+          <div class="field"><label>Conteúdo trabalhado</label><textarea id="s-conteudo">${escapeHtml(s.conteudo_trabalhado)}</textarea></div>
+
+          <div class="ficha-actions">
+            <button type="submit" class="btn btn-primary">Criar sessão</button>
+            <button type="button" class="btn btn-ghost" onclick="voltarParaSessoes()">Cancelar</button>
+          </div>
+        </form>
+      </div>
+    </div>`;
+}
+
+function renderSessaoDetail(){
+  const s = state.sessaoAtual;
+  if (s.carregando){
+    app.innerHTML = `${renderTopbar()}<div class="center-screen"><div class="spinner"></div></div>`;
+    return;
+  }
+
+  const sessao = s.sessao;
+  const idsNaSessao = new Set(s.presencas.map(p => p.atleta_id));
+  const disponiveis = state.atletas.filter(a => a.status === 'ativo' && !idsNaSessao.has(a.id));
+
+  const statusOpcoes = [['presente','Presente'],['ausente','Ausente'],['justificado','Justificado'],['parcial','Parcial']];
+
+  app.innerHTML = `
+    ${renderTopbar()}
+    <div class="main">
+      <button class="btn btn-ghost btn-sm" style="margin-bottom:14px" onclick="voltarParaSessoes()">← Voltar</button>
+      <h1>${new Date(sessao.data+'T00:00:00').toLocaleDateString('pt-BR', {weekday:'long', day:'2-digit', month:'2-digit'})}</h1>
+      <p class="muted" style="margin-bottom:20px">
+        ${escapeHtml(sessao.tipo)} · ${sessao.duracao_min} min
+        ${sessao.turmas ? ' · ' + escapeHtml(sessao.turmas.nome) : ' · avulsa'}
+        ${sessao.local ? ' · ' + escapeHtml(sessao.local) : ''}
+      </p>
+
+      ${sessao.conteudo_trabalhado ? `<div class="card" style="margin-bottom:16px"><div class="section-title">Conteúdo trabalhado</div>${escapeHtml(sessao.conteudo_trabalhado)}</div>` : ''}
+
+      <div class="section-title">Presença (${s.presencas.length})</div>
+      <div class="card" style="padding:4px 16px">
+        ${s.presencas.length === 0 ? `<div class="empty">Ninguém adicionado ainda.</div>` :
+          s.presencas.map(p => `
+            <div class="presenca-row">
+              <span class="nome">${escapeHtml(p.atletas?.nome || '—')}</span>
+              <div class="status-seg">
+                ${statusOpcoes.map(([c,n]) => `<button class="${p.status===c?'on-'+c:''}" onclick="atualizarStatusPresenca('${p.id}','${c}')">${n}</button>`).join('')}
+              </div>
+              <span class="pse-badge ${p.pse!==null?'respondido':''}">${p.pse!==null ? 'PSE '+p.pse : 'PSE pendente'}</span>
+            </div>
+          `).join('')}
+      </div>
+
+      ${disponiveis.length > 0 ? `
+        <div class="field" style="margin-top:16px">
+          <label>Adicionar atleta a esta sessão</label>
+          <select onchange="adicionarAtletaNaSessao(this.value); this.value=''">
+            <option value="">Selecione…</option>
+            ${disponiveis.map(a => `<option value="${a.id}">${escapeHtml(a.nome)}</option>`).join('')}
+          </select>
+        </div>
+      ` : ''}
+    </div>`;
+}
+
+init();
+</script>
+</body>
+</html>
