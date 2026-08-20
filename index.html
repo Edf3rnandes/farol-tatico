@@ -172,6 +172,22 @@
   .spinner{width:26px;height:26px;border-radius:50%;border:3px solid var(--line);
            border-top-color:var(--a);animation:spin .8s linear infinite}
   @keyframes spin{to{transform:rotate(360deg)}}
+
+  /* ---------- scout ao vivo ---------- */
+  .scout-lado{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:14px 0}
+  .scout-lado-btn{padding:26px 10px;border-radius:14px;border:none;font-size:1.1rem;font-weight:800;
+                  letter-spacing:.02em;cursor:pointer;color:#fff;transition:transform .08s}
+  .scout-lado-btn.nos{background:var(--c)}
+  .scout-lado-btn.eles{background:var(--d)}
+  .scout-lado-btn:disabled{opacity:.5}
+  .scout-lado-btn:active{transform:scale(.97)}
+  .scout-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:6px}
+  .scout-btn{padding:16px 8px;border-radius:12px;border:1px solid var(--line);background:var(--card2);
+             color:var(--tx);font-weight:700;font-size:.86rem;cursor:pointer;line-height:1.4}
+  .scout-btn span{font-weight:600;color:var(--tx2);font-size:.78rem}
+  .scout-btn:disabled{opacity:.5}
+  .scout-btn:active{transform:scale(.97)}
+  .placar-set{font-size:2.6rem;font-weight:800;letter-spacing:-.02em}
 </style>
 </head>
 <body>
@@ -220,6 +236,15 @@ let state = {
   sessoes: [],
   sessaoEdit: null,         // form de nova sessão
   sessaoAtual: null,        // sessão aberta (detalhe), com presenças carregadas
+
+  // jogos / scout
+  jogosCarregados: false,
+  jogos: [],
+  competicoesCarregadas: false,
+  competicoes: [],
+  subtipos: null,           // vocabulário do scout (ft.subtipos_acao), carregado uma vez
+  novoJogo: null,           // form de novo jogo
+  jogoAtual: null,          // jogo aberto na tela de scout, com sets e rallies carregados
 };
 
 function escapeHtml(s){
@@ -347,6 +372,13 @@ async function irParaAba(aba){
   state.aba = aba;
   if (aba === 'atletas'){
     state.view = 'lista';
+    render();
+    return;
+  }
+  if (aba === 'jogos'){
+    state.view = 'jogos';
+    render();
+    if (!state.jogosCarregados) await carregarJogos();
     render();
     return;
   }
@@ -807,6 +839,322 @@ async function adicionarAtletaNaSessao(atletaId){
   render();
 }
 
+/* ---------------------------- jogos / scout ---------------------------- */
+
+const NIVEIS_COMPETICAO = [
+  ['internacional','Internacional'], ['nacional','Nacional'], ['regional','Regional'],
+  ['estadual','Estadual'], ['municipal','Municipal'], ['festival','Festival'],
+];
+const FASES_JOGO = [
+  ['grupo','Fase de grupos'], ['repescagem','Repescagem'], ['16avos','16-avos'],
+  ['oitavas','Oitavas'], ['quartas','Quartas'], ['semifinal','Semifinal'],
+  ['disputa_3','Disputa de 3º'], ['final','Final'], ['amistoso','Amistoso'],
+];
+function labelFase(f){ const par = FASES_JOGO.find(([c]) => c === f); return par ? par[1] : f; }
+
+async function carregarJogos(){
+  const { data, error } = await sb.from('jogos')
+    .select('*, duplas(atleta_1_id, atleta_2_id), adversarios(atleta_1_nome, atleta_2_nome, equipe), competicoes(nome, nivel)')
+    .order('criado_em', { ascending: false })
+    .limit(60);
+  if (error){ toast('Erro ao carregar jogos: ' + error.message, 'err'); return; }
+  state.jogos = data || [];
+  state.jogosCarregados = true;
+}
+
+async function carregarCompeticoes(){
+  const { data, error } = await sb.from('competicoes').select('*').order('data_inicio', { ascending: false });
+  if (error){ toast('Erro ao carregar competições: ' + error.message, 'err'); return; }
+  state.competicoes = data || [];
+  state.competicoesCarregadas = true;
+}
+
+async function carregarSubtipos(){
+  const { data, error } = await sb.from('subtipos_acao').select('*').eq('ativo', true).order('origem').order('ordem');
+  if (error){ toast('Erro ao carregar vocabulário do scout: ' + error.message, 'err'); state.subtipos = []; return; }
+  state.subtipos = data || [];
+}
+
+async function voltarParaJogos(){
+  state.view = 'jogos';
+  state.novoJogo = null;
+  state.jogoAtual = null;
+  render();
+  if (!state.jogosCarregados){ await carregarJogos(); render(); }
+}
+
+/* -------- novo jogo -------- */
+
+async function abrirNovoJogo(){
+  state.view = 'jogo-novo';
+  state.novoJogo = {
+    competicao_id: '', nova_competicao_nome: '', nova_competicao_nivel: 'estadual',
+    nova_competicao_data: new Date().toISOString().slice(0,10),
+    atleta_1_id: '', atleta_2_id: '',
+    adv_1_nome: '', adv_2_nome: '', adv_equipe: '', adv_uf: '',
+    fase: 'grupo', quadra: '', vento: '', sol: '',
+  };
+  render();
+  if (!state.competicoesCarregadas) { await carregarCompeticoes(); render(); }
+}
+
+function sincronizarNovoJogoDoDom(){
+  const n = state.novoJogo;
+  const g = (id) => document.getElementById(id);
+  if (g('nj-competicao')) n.competicao_id = g('nj-competicao').value;
+  if (g('nj-nc-nome'))    n.nova_competicao_nome = g('nj-nc-nome').value;
+  if (g('nj-nc-data'))    n.nova_competicao_data = g('nj-nc-data').value;
+  if (g('nj-nc-nivel'))   n.nova_competicao_nivel = g('nj-nc-nivel').value;
+  if (g('nj-atleta1'))    n.atleta_1_id = g('nj-atleta1').value;
+  if (g('nj-atleta2'))    n.atleta_2_id = g('nj-atleta2').value;
+  if (g('nj-adv1'))       n.adv_1_nome = g('nj-adv1').value;
+  if (g('nj-adv2'))       n.adv_2_nome = g('nj-adv2').value;
+  if (g('nj-adv-equipe')) n.adv_equipe = g('nj-adv-equipe').value;
+  if (g('nj-adv-uf'))     n.adv_uf = g('nj-adv-uf').value;
+  if (g('nj-fase'))       n.fase = g('nj-fase').value;
+  if (g('nj-quadra'))     n.quadra = g('nj-quadra').value;
+  if (g('nj-vento'))      n.vento = g('nj-vento').value;
+  if (g('nj-sol'))        n.sol = g('nj-sol').value;
+}
+
+function mudarCompeticaoNovoJogo(v){
+  sincronizarNovoJogoDoDom();
+  state.novoJogo.competicao_id = v;
+  render();
+}
+
+async function salvarNovoJogo(ev){
+  ev.preventDefault();
+  sincronizarNovoJogoDoDom();
+  const n = state.novoJogo;
+
+  if (!n.competicao_id){ toast('Escolhe ou cria uma competição.', 'err'); return; }
+  if (!n.atleta_1_id || !n.atleta_2_id){ toast('Escolhe os dois atletas da dupla.', 'err'); return; }
+  if (n.atleta_1_id === n.atleta_2_id){ toast('Escolhe dois atletas diferentes.', 'err'); return; }
+  if (!n.adv_1_nome){ toast('Preenche pelo menos o nome de um adversário.', 'err'); return; }
+
+  let competicaoId = n.competicao_id;
+  if (competicaoId === '__nova__'){
+    if (!n.nova_competicao_nome){ toast('Dá um nome pra competição.', 'err'); return; }
+    if (!n.nova_competicao_data){ toast('Preenche a data de início da competição.', 'err'); return; }
+    const resp = await sb.from('competicoes').insert({
+      nome: n.nova_competicao_nome, nivel: n.nova_competicao_nivel, data_inicio: n.nova_competicao_data,
+    }).select().single();
+    if (resp.error){ toast('Erro ao criar competição: ' + resp.error.message, 'err'); return; }
+    competicaoId = resp.data.id;
+  }
+
+  const duplaExistente = await sb.from('duplas').select('id')
+    .eq('competicao_id', competicaoId).eq('atleta_1_id', n.atleta_1_id).eq('atleta_2_id', n.atleta_2_id)
+    .maybeSingle();
+  let duplaId = duplaExistente.data?.id;
+  if (!duplaId){
+    const resp = await sb.from('duplas')
+      .insert({ competicao_id: competicaoId, atleta_1_id: n.atleta_1_id, atleta_2_id: n.atleta_2_id })
+      .select().single();
+    if (resp.error){ toast('Erro ao registrar a dupla: ' + resp.error.message, 'err'); return; }
+    duplaId = resp.data.id;
+  }
+
+  const advResp = await sb.from('adversarios').insert({
+    atleta_1_nome: n.adv_1_nome, atleta_2_nome: n.adv_2_nome || null,
+    equipe: n.adv_equipe || null, uf: n.adv_uf || null,
+  }).select().single();
+  if (advResp.error){ toast('Erro ao registrar adversário: ' + advResp.error.message, 'err'); return; }
+
+  const jogoResp = await sb.from('jogos').insert({
+    competicao_id: competicaoId, dupla_id: duplaId, adversario_id: advResp.data.id,
+    fase: n.fase, quadra: n.quadra || null, vento: n.vento || null, sol: n.sol || null,
+  }).select().single();
+  if (jogoResp.error){ toast('Erro ao criar o jogo: ' + jogoResp.error.message, 'err'); return; }
+
+  const setResp = await sb.from('sets').insert({ jogo_id: jogoResp.data.id, numero: 1, lado_inicial: 'A' }).select().single();
+  if (setResp.error){ toast('Erro ao criar o primeiro set: ' + setResp.error.message, 'err'); return; }
+
+  state.jogosCarregados = false; // recarrega a lista na próxima vez que abrir
+  toast('Jogo criado. Bora marcar!', 'ok');
+  await abrirScout(jogoResp.data.id);
+}
+
+/* -------- scout ao vivo -------- */
+
+function atletasDaDupla(ja){
+  const d = ja.jogo.duplas;
+  return [
+    state.atletas.find(a => a.id === d.atleta_1_id) || { id: d.atleta_1_id, nome: '?' },
+    state.atletas.find(a => a.id === d.atleta_2_id) || { id: d.atleta_2_id, nome: '?' },
+  ];
+}
+
+function nomeAtletaCurto(id){
+  if (!id) return '';
+  const a = state.atletas.find(x => x.id === id);
+  return a ? (a.apelido || a.nome) : '';
+}
+
+function labelOrigem(o){
+  return { ataque:'Ataque', saque:'Saque', bloqueio:'Bloqueio', erro_adversario:'Erro do adversário', outro:'Outro' }[o] || o;
+}
+
+async function abrirScout(jogoId){
+  state.view = 'jogo-scout';
+  state.jogoAtual = { carregando: true };
+  render();
+
+  if (!state.subtipos) await carregarSubtipos();
+
+  const [{ data: jogo, error: e1 }, { data: sets, error: e2 }] = await Promise.all([
+    sb.from('jogos').select('*, duplas(id, atleta_1_id, atleta_2_id), adversarios(*), competicoes(nome, nivel)').eq('id', jogoId).single(),
+    sb.from('sets').select('*').eq('jogo_id', jogoId).order('numero'),
+  ]);
+  if (e1 || e2){ toast('Erro ao abrir o jogo: ' + (e1 || e2).message, 'err'); voltarParaJogos(); return; }
+
+  const setAtual = sets[sets.length - 1];
+  const { data: rallies, error: e3 } = await sb.from('rallies').select('*').eq('set_id', setAtual.id).order('numero');
+  if (e3){ toast('Erro ao carregar os pontos: ' + e3.message, 'err'); return; }
+
+  state.jogoAtual = {
+    carregando: false,
+    jogo, sets, setAtualId: setAtual.id, rallies: rallies || [],
+    sacadorId: jogo.duplas.atleta_1_id,
+    passo: null, salvando: false,
+    finalizado: jogo.sets_pro === 2 || jogo.sets_contra === 2,
+  };
+  render();
+}
+
+function definirSacador(atletaId){
+  state.jogoAtual.sacadorId = atletaId;
+  render();
+}
+
+function escolherLado(lado){
+  state.jogoAtual.passo = lado;
+  render();
+}
+
+function cancelarPasso(){
+  state.jogoAtual.passo = null;
+  render();
+}
+
+// O time que ganha o rally saca o próximo — vale desde a primeira bola do set
+// (que alterna a cada set novo, começando com o nosso saque no set 1).
+function sacadorLadoParaProximaRally(){
+  const ja = state.jogoAtual;
+  if (ja.rallies.length === 0){
+    const indiceSet = ja.sets.findIndex(s => s.id === ja.setAtualId);
+    return indiceSet % 2 === 0 ? 'nos' : 'eles';
+  }
+  return ja.rallies[ja.rallies.length - 1].ponto_para;
+}
+
+async function registrarPonto(ladoVencedor, origem, atletaId){
+  const ja = state.jogoAtual;
+  if (ja.salvando) return;
+
+  const ultimo = ja.rallies[ja.rallies.length - 1];
+  const proPro = ultimo ? ultimo.placar_pro : 0;
+  const proContra = ultimo ? ultimo.placar_contra : 0;
+  const novoPro = ladoVencedor === 'nos' ? proPro + 1 : proPro;
+  const novoContra = ladoVencedor === 'eles' ? proContra + 1 : proContra;
+  const sacadorLado = sacadorLadoParaProximaRally();
+
+  ja.salvando = true;
+  render();
+
+  const resp = await sb.from('rallies').insert({
+    set_id: ja.setAtualId,
+    numero: ja.rallies.length + 1,
+    ponto_para: ladoVencedor,
+    origem,
+    atleta_id: atletaId || null,
+    sacador_lado: sacadorLado,
+    sacador_atleta_id: sacadorLado === 'nos' ? ja.sacadorId : null,
+    placar_pro: novoPro,
+    placar_contra: novoContra,
+  }).select().single();
+
+  ja.salvando = false;
+
+  if (resp.error){ toast('Não deu pra salvar o ponto: ' + resp.error.message, 'err'); render(); return; }
+
+  ja.rallies.push(resp.data);
+  ja.passo = null;
+
+  const setAtual = ja.sets.find(s => s.id === ja.setAtualId);
+  setAtual.pontos_pro = novoPro;
+  setAtual.pontos_contra = novoContra;
+  await sb.from('sets').update({ pontos_pro: novoPro, pontos_contra: novoContra }).eq('id', ja.setAtualId);
+
+  await checarFimDeSet();
+  render();
+}
+
+async function checarFimDeSet(){
+  const ja = state.jogoAtual;
+  const setAtual = ja.sets.find(s => s.id === ja.setAtualId);
+  const limite = ja.sets.length === 3 ? 15 : 21;
+  const p = setAtual.pontos_pro, c = setAtual.pontos_contra;
+  const acabou = (p >= limite || c >= limite) && Math.abs(p - c) >= 2;
+  if (!acabou) return;
+
+  const nosGanhamos = p > c;
+  ja.jogo.sets_pro    += nosGanhamos ? 1 : 0;
+  ja.jogo.sets_contra += nosGanhamos ? 0 : 1;
+  await sb.from('jogos').update({ sets_pro: ja.jogo.sets_pro, sets_contra: ja.jogo.sets_contra }).eq('id', ja.jogo.id);
+
+  if (ja.jogo.sets_pro === 2 || ja.jogo.sets_contra === 2){
+    toast(`Set encerrado ${p}-${c}. Jogo finalizado: ${ja.jogo.sets_pro} × ${ja.jogo.sets_contra}!`, 'ok');
+    ja.finalizado = true;
+    return;
+  }
+
+  toast(`Set encerrado ${p}-${c}. Abrindo o próximo set…`, 'ok');
+  const resp = await sb.from('sets').insert({
+    jogo_id: ja.jogo.id, numero: setAtual.numero + 1,
+    lado_inicial: setAtual.lado_inicial === 'A' ? 'B' : 'A',
+  }).select().single();
+  if (resp.error){ toast('Erro ao criar o próximo set: ' + resp.error.message, 'err'); return; }
+
+  ja.sets.push(resp.data);
+  ja.setAtualId = resp.data.id;
+  ja.rallies = [];
+  ja.sacadorId = ja.jogo.duplas.atleta_1_id;
+}
+
+async function desfazerUltimoPonto(){
+  const ja = state.jogoAtual;
+  if (!ja.rallies.length) return;
+  if (!confirm('Desfazer o último ponto marcado?')) return;
+
+  const ultimo = ja.rallies[ja.rallies.length - 1];
+  const resp = await sb.from('rallies').delete().eq('id', ultimo.id);
+  if (resp.error){ toast('Não deu pra desfazer: ' + resp.error.message, 'err'); return; }
+
+  ja.rallies.pop();
+  const anterior = ja.rallies[ja.rallies.length - 1];
+  const novoPro = anterior ? anterior.placar_pro : 0;
+  const novoContra = anterior ? anterior.placar_contra : 0;
+  const setAtual = ja.sets.find(s => s.id === ja.setAtualId);
+  setAtual.pontos_pro = novoPro;
+  setAtual.pontos_contra = novoContra;
+  await sb.from('sets').update({ pontos_pro: novoPro, pontos_contra: novoContra }).eq('id', ja.setAtualId);
+
+  toast('Ponto desfeito.', 'ok');
+  render();
+}
+
+async function definirSubtipoRally(rallyId, subtipoId){
+  const valor = subtipoId ? Number(subtipoId) : null;
+  const resp = await sb.from('rallies').update({ subtipo_id: valor }).eq('id', rallyId);
+  if (resp.error){ toast('Erro ao salvar o detalhe: ' + resp.error.message, 'err'); return; }
+  const r = state.jogoAtual.rallies.find(x => x.id === rallyId);
+  if (r) r.subtipo_id = valor;
+  toast('Detalhe salvo.', 'ok');
+  render();
+}
+
 /* ---------------------------- lista: filtro ---------------------------- */
 
 function atualizarFiltro(campo, valor){
@@ -838,6 +1186,9 @@ function render(){
   if (state.view === 'sessoes')       return renderSessoes();
   if (state.view === 'sessao-edit')   return renderSessaoEdit();
   if (state.view === 'sessao-detail') return renderSessaoDetail();
+  if (state.view === 'jogos')         return renderJogos();
+  if (state.view === 'jogo-novo')     return renderNovoJogo();
+  if (state.view === 'jogo-scout')    return renderScout();
 }
 
 function logoSvg(){
@@ -858,6 +1209,7 @@ function renderTopbar(){
       ${state.user && state.usuario ? `
         <nav class="topnav">
           <button class="${state.aba==='atletas'?'on':''}" onclick="irParaAba('atletas')">Atletas</button>
+          <button class="${state.aba==='jogos'?'on':''}" onclick="irParaAba('jogos')">Jogos</button>
           <button class="${state.aba==='treinos'?'on':''}" onclick="irParaAba('treinos')">Treinos</button>
         </nav>
       ` : ''}
@@ -1360,6 +1712,243 @@ function renderSessaoDetail(){
           </select>
         </div>
       ` : ''}
+    </div>`;
+}
+
+/* ---------------------------- render: jogos ---------------------------- */
+
+function renderJogos(){
+  app.innerHTML = `
+    ${renderTopbar()}
+    <div class="main">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+        <h1 style="flex:1">Jogos</h1>
+        <button class="btn btn-primary" onclick="abrirNovoJogo()">+ Novo jogo</button>
+      </div>
+
+      ${state.jogos.length === 0 ? `<div class="empty">Nenhum jogo registrado ainda.</div>` :
+        state.jogos.map(j => {
+          const a1 = state.atletas.find(a => a.id === j.duplas?.atleta_1_id);
+          const a2 = state.atletas.find(a => a.id === j.duplas?.atleta_2_id);
+          const nomesDupla = [a1?.apelido || a1?.nome, a2?.apelido || a2?.nome].filter(Boolean).join(' / ');
+          const nomesAdv = [j.adversarios?.atleta_1_nome, j.adversarios?.atleta_2_nome].filter(Boolean).join(' / ');
+          return `
+            <div class="list-item" onclick="abrirScout('${j.id}')">
+              <div class="top">
+                <div class="titulo">${escapeHtml(nomesDupla || 'Nossa dupla')} × ${escapeHtml(nomesAdv || 'adversário')}</div>
+                <span class="pill">${j.sets_pro} × ${j.sets_contra}</span>
+              </div>
+              <div class="meta">
+                ${j.competicoes ? escapeHtml(j.competicoes.nome) : ''} · ${labelFase(j.fase)}
+                ${j.data_hora ? ' · ' + new Date(j.data_hora).toLocaleDateString('pt-BR') : ''}
+              </div>
+            </div>`;
+        }).join('')}
+    </div>`;
+}
+
+function renderNovoJogo(){
+  const n = state.novoJogo;
+  const atletasAtivos = state.atletas.filter(a => a.status === 'ativo');
+
+  app.innerHTML = `
+    ${renderTopbar()}
+    <div class="main">
+      <button class="btn btn-ghost btn-sm" style="margin-bottom:14px" onclick="voltarParaJogos()">← Voltar</button>
+      <h1>Novo jogo</h1>
+      <p class="muted" style="margin-bottom:20px">Depois de salvar, já abre a tela de marcar os pontos.</p>
+
+      <div class="card">
+        <form onsubmit="salvarNovoJogo(event)">
+          <div class="section-title">Competição</div>
+          <div class="field">
+            <label>Competição *</label>
+            <select id="nj-competicao" onchange="mudarCompeticaoNovoJogo(this.value)">
+              <option value="">Selecione…</option>
+              <option value="__nova__" ${n.competicao_id==='__nova__'?'selected':''}>+ Nova competição</option>
+              ${state.competicoes.map(c => `<option value="${c.id}" ${n.competicao_id===c.id?'selected':''}>${escapeHtml(c.nome)} (${c.nivel})</option>`).join('')}
+            </select>
+          </div>
+          ${n.competicao_id === '__nova__' ? `
+            <div class="row2">
+              <div class="field"><label>Nome da competição *</label><input id="nj-nc-nome" value="${escapeHtml(n.nova_competicao_nome)}"></div>
+              <div class="field"><label>Data de início *</label><input id="nj-nc-data" type="date" value="${n.nova_competicao_data}"></div>
+            </div>
+            <div class="field">
+              <label>Nível</label>
+              <select id="nj-nc-nivel">
+                ${NIVEIS_COMPETICAO.map(([c,l]) => `<option value="${c}" ${n.nova_competicao_nivel===c?'selected':''}>${l}</option>`).join('')}
+              </select>
+            </div>
+          ` : ''}
+
+          <div class="section-title" style="margin-top:20px">Nossa dupla</div>
+          <div class="row2">
+            <div class="field">
+              <label>Atleta 1 *</label>
+              <select id="nj-atleta1">
+                <option value="">Selecione…</option>
+                ${atletasAtivos.map(a => `<option value="${a.id}" ${n.atleta_1_id===a.id?'selected':''}>${escapeHtml(a.nome)}</option>`).join('')}
+              </select>
+            </div>
+            <div class="field">
+              <label>Atleta 2 *</label>
+              <select id="nj-atleta2">
+                <option value="">Selecione…</option>
+                ${atletasAtivos.map(a => `<option value="${a.id}" ${n.atleta_2_id===a.id?'selected':''}>${escapeHtml(a.nome)}</option>`).join('')}
+              </select>
+            </div>
+          </div>
+
+          <div class="section-title" style="margin-top:20px">Adversário</div>
+          <div class="row2">
+            <div class="field"><label>Nome do adversário 1 *</label><input id="nj-adv1" value="${escapeHtml(n.adv_1_nome)}"></div>
+            <div class="field"><label>Nome do adversário 2</label><input id="nj-adv2" value="${escapeHtml(n.adv_2_nome)}"></div>
+          </div>
+          <div class="row2">
+            <div class="field"><label>Equipe/cidade</label><input id="nj-adv-equipe" value="${escapeHtml(n.adv_equipe)}"></div>
+            <div class="field"><label>UF</label><input id="nj-adv-uf" maxlength="2" style="text-transform:uppercase" value="${escapeHtml(n.adv_uf)}"></div>
+          </div>
+
+          <div class="section-title" style="margin-top:20px">Detalhes do jogo</div>
+          <div class="field">
+            <label>Fase</label>
+            <select id="nj-fase">
+              ${FASES_JOGO.map(([c,l]) => `<option value="${c}" ${n.fase===c?'selected':''}>${l}</option>`).join('')}
+            </select>
+          </div>
+          <div class="row3">
+            <div class="field"><label>Quadra</label><input id="nj-quadra" value="${escapeHtml(n.quadra)}"></div>
+            <div class="field">
+              <label>Vento</label>
+              <select id="nj-vento">
+                <option value="">—</option>
+                <option value="sem" ${n.vento==='sem'?'selected':''}>Sem vento</option>
+                <option value="fraco" ${n.vento==='fraco'?'selected':''}>Fraco</option>
+                <option value="moderado" ${n.vento==='moderado'?'selected':''}>Moderado</option>
+                <option value="forte" ${n.vento==='forte'?'selected':''}>Forte</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Sol</label>
+              <select id="nj-sol">
+                <option value="">—</option>
+                <option value="nublado" ${n.sol==='nublado'?'selected':''}>Nublado</option>
+                <option value="fraco" ${n.sol==='fraco'?'selected':''}>Fraco</option>
+                <option value="forte" ${n.sol==='forte'?'selected':''}>Forte</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="ficha-actions">
+            <button type="submit" class="btn btn-primary">Criar jogo e começar a marcar</button>
+            <button type="button" class="btn btn-ghost" onclick="voltarParaJogos()">Cancelar</button>
+          </div>
+        </form>
+      </div>
+    </div>`;
+}
+
+function renderTimelineRallies(ja){
+  const subtiposPorOrigem = (origem) => (state.subtipos || []).filter(s => s.origem === origem);
+  return `
+    <div class="section-title" style="margin-top:22px">Linha do set (${ja.rallies.length} ponto${ja.rallies.length===1?'':'s'})</div>
+    ${ja.rallies.length === 0 ? `<div class="empty">Nenhum ponto marcado ainda neste set.</div>` :
+      [...ja.rallies].reverse().map(r => {
+        const opcoes = subtiposPorOrigem(r.origem);
+        return `
+          <div class="list-item" style="cursor:default">
+            <div class="top">
+              <div class="titulo">${r.numero}. ${r.ponto_para==='nos'?'Nós':'Eles'} ${r.placar_pro}-${r.placar_contra}</div>
+              <span class="pill">${labelOrigem(r.origem)}</span>
+            </div>
+            <div class="meta" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              ${r.atleta_id ? `<span>${escapeHtml(nomeAtletaCurto(r.atleta_id))}</span>` : ''}
+              ${opcoes.length ? `
+                <select onchange="definirSubtipoRally('${r.id}', this.value)"
+                        style="background:var(--card);border:1px solid var(--line);color:var(--tx2);
+                               border-radius:7px;padding:4px 8px;font-size:.76rem">
+                  <option value="">Detalhe…</option>
+                  ${opcoes.map(s => `<option value="${s.id}" ${r.subtipo_id===s.id?'selected':''}>${escapeHtml(s.nome)}</option>`).join('')}
+                </select>
+              ` : ''}
+            </div>
+          </div>`;
+      }).join('')}`;
+}
+
+function renderScout(){
+  const ja = state.jogoAtual;
+  if (ja.carregando){
+    app.innerHTML = `${renderTopbar()}<div class="center-screen"><div class="spinner"></div></div>`;
+    return;
+  }
+
+  const [atleta1, atleta2] = atletasDaDupla(ja);
+  const setAtual = ja.sets.find(s => s.id === ja.setAtualId);
+  const nomesAdv = [ja.jogo.adversarios?.atleta_1_nome, ja.jogo.adversarios?.atleta_2_nome].filter(Boolean).join(' / ');
+
+  app.innerHTML = `
+    ${renderTopbar()}
+    <div class="main">
+      <button class="btn btn-ghost btn-sm" style="margin-bottom:14px" onclick="voltarParaJogos()">← Voltar</button>
+
+      <h1>${escapeHtml(atleta1.apelido || atleta1.nome)} / ${escapeHtml(atleta2.apelido || atleta2.nome)}</h1>
+      <p class="muted" style="margin-bottom:16px">
+        vs ${escapeHtml(nomesAdv || 'adversário')}
+        ${ja.jogo.competicoes ? ' · ' + escapeHtml(ja.jogo.competicoes.nome) : ''} · ${labelFase(ja.jogo.fase)}
+      </p>
+
+      <div class="card" style="text-align:center;margin-bottom:16px">
+        <div class="muted" style="margin-bottom:2px">Sets: ${ja.jogo.sets_pro} × ${ja.jogo.sets_contra} — Set ${setAtual.numero}</div>
+        <div class="placar-set">${setAtual.pontos_pro} <span style="color:var(--tx3);font-size:1.6rem">×</span> ${setAtual.pontos_contra}</div>
+      </div>
+
+      ${ja.finalizado ? `
+        <div class="card" style="text-align:center;margin-bottom:16px">
+          <div class="ok-check" style="justify-content:center;display:flex">Jogo encerrado.</div>
+        </div>
+      ` : `
+        <div class="field">
+          <label>Sacando agora (nosso lado)</label>
+          <div class="seg">
+            <button type="button" class="${ja.sacadorId===atleta1.id?'on':''}" onclick="definirSacador('${atleta1.id}')">${escapeHtml(atleta1.apelido || atleta1.nome)}</button>
+            <button type="button" class="${ja.sacadorId===atleta2.id?'on':''}" onclick="definirSacador('${atleta2.id}')">${escapeHtml(atleta2.apelido || atleta2.nome)}</button>
+          </div>
+        </div>
+
+        ${ja.passo === null ? `
+          <div class="scout-lado">
+            <button type="button" class="scout-lado-btn nos" onclick="escolherLado('nos')" ${ja.salvando?'disabled':''}>PONTO NOSSO</button>
+            <button type="button" class="scout-lado-btn eles" onclick="escolherLado('eles')" ${ja.salvando?'disabled':''}>PONTO DELES</button>
+          </div>
+        ` : `
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+            <p class="muted" style="margin:0;flex:1">${ja.passo==='nos' ? 'Ponto nosso — como?' : 'Ponto deles — como?'}</p>
+            <button type="button" class="btn btn-ghost btn-sm" onclick="cancelarPasso()">Cancelar</button>
+          </div>
+          <div class="scout-grid">
+            ${ja.passo === 'nos' ? `
+              ${[atleta1, atleta2].map(at => `
+                <button type="button" class="scout-btn" onclick="registrarPonto('nos','ataque','${at.id}')" ${ja.salvando?'disabled':''}>Ataque<br><span>${escapeHtml(at.apelido || at.nome)}</span></button>
+                <button type="button" class="scout-btn" onclick="registrarPonto('nos','saque','${at.id}')" ${ja.salvando?'disabled':''}>Ace<br><span>${escapeHtml(at.apelido || at.nome)}</span></button>
+                <button type="button" class="scout-btn" onclick="registrarPonto('nos','bloqueio','${at.id}')" ${ja.salvando?'disabled':''}>Bloqueio<br><span>${escapeHtml(at.apelido || at.nome)}</span></button>
+              `).join('')}
+              <button type="button" class="scout-btn" onclick="registrarPonto('nos','erro_adversario', null)" ${ja.salvando?'disabled':''}>Erro do<br><span>adversário</span></button>
+              <button type="button" class="scout-btn" onclick="registrarPonto('nos','outro', null)" ${ja.salvando?'disabled':''}>Outro</button>
+            ` : `
+              <button type="button" class="scout-btn" onclick="registrarPonto('eles','ataque', null)" ${ja.salvando?'disabled':''}>Ataque<br><span>deles</span></button>
+              <button type="button" class="scout-btn" onclick="registrarPonto('eles','saque', null)" ${ja.salvando?'disabled':''}>Ace<br><span>deles</span></button>
+              <button type="button" class="scout-btn" onclick="registrarPonto('eles','bloqueio', null)" ${ja.salvando?'disabled':''}>Bloqueio<br><span>deles</span></button>
+              <button type="button" class="scout-btn" onclick="registrarPonto('eles','outro', null)" ${ja.salvando?'disabled':''}>Outro</button>
+            `}
+          </div>
+        `}
+
+        <button class="btn btn-ghost btn-sm" style="margin-top:14px" onclick="desfazerUltimoPonto()" ${ja.rallies.length===0?'disabled':''}>↩ Desfazer último ponto</button>
+      `}
+
+      ${renderTimelineRallies(ja)}
     </div>`;
 }
 
