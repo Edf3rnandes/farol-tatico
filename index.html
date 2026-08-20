@@ -1016,25 +1016,42 @@ async function abrirScout(jogoId){
   state.jogoAtual = {
     carregando: false,
     jogo, sets, setAtualId: setAtual.id, rallies: rallies || [],
-    sacadorId: jogo.duplas.atleta_1_id,
-    passo: null, salvando: false,
+    passo: null, acaoEscolhida: null, salvando: false,
     finalizado: jogo.sets_pro === 2 || jogo.sets_contra === 2,
   };
   render();
 }
 
-function definirSacador(atletaId){
-  state.jogoAtual.sacadorId = atletaId;
-  render();
-}
+// Fundamentos com detalhe (direção/tipo). Pra estes, depois de escolher quem fez
+// a ação a gente ainda pergunta o detalhe antes de gravar. Erro do adversário e
+// Outro não têm detalhe — gravam na hora.
+const ORIGENS_COM_DETALHE = ['ataque', 'saque', 'bloqueio'];
 
 function escolherLado(lado){
   state.jogoAtual.passo = lado;
+  state.jogoAtual.acaoEscolhida = null;
   render();
 }
 
 function cancelarPasso(){
   state.jogoAtual.passo = null;
+  state.jogoAtual.acaoEscolhida = null;
+  render();
+}
+
+// Passo intermediário: se o fundamento tem detalhe (ataque/saque/bloqueio),
+// mostra os botões de detalhe (paralela, flutuado, etc). Senão grava direto.
+function escolherAcao(ladoVencedor, origem, atletaId){
+  if (!ORIGENS_COM_DETALHE.includes(origem)){
+    registrarPonto(ladoVencedor, origem, atletaId, null);
+    return;
+  }
+  state.jogoAtual.acaoEscolhida = { ladoVencedor, origem, atletaId };
+  render();
+}
+
+function cancelarAcao(){
+  state.jogoAtual.acaoEscolhida = null;
   render();
 }
 
@@ -1049,7 +1066,7 @@ function sacadorLadoParaProximaRally(){
   return ja.rallies[ja.rallies.length - 1].ponto_para;
 }
 
-async function registrarPonto(ladoVencedor, origem, atletaId){
+async function registrarPonto(ladoVencedor, origem, atletaId, subtipoId){
   const ja = state.jogoAtual;
   if (ja.salvando) return;
 
@@ -1069,8 +1086,9 @@ async function registrarPonto(ladoVencedor, origem, atletaId){
     ponto_para: ladoVencedor,
     origem,
     atleta_id: atletaId || null,
+    subtipo_id: subtipoId || null,
     sacador_lado: sacadorLado,
-    sacador_atleta_id: sacadorLado === 'nos' ? ja.sacadorId : null,
+    sacador_atleta_id: null,
     placar_pro: novoPro,
     placar_contra: novoContra,
   }).select().single();
@@ -1081,6 +1099,7 @@ async function registrarPonto(ladoVencedor, origem, atletaId){
 
   ja.rallies.push(resp.data);
   ja.passo = null;
+  ja.acaoEscolhida = null;
 
   const setAtual = ja.sets.find(s => s.id === ja.setAtualId);
   setAtual.pontos_pro = novoPro;
@@ -1120,7 +1139,6 @@ async function checarFimDeSet(){
   ja.sets.push(resp.data);
   ja.setAtualId = resp.data.id;
   ja.rallies = [];
-  ja.sacadorId = ja.jogo.duplas.atleta_1_id;
 }
 
 async function desfazerUltimoPonto(){
@@ -1909,20 +1927,12 @@ function renderScout(){
           <div class="ok-check" style="justify-content:center;display:flex">Jogo encerrado.</div>
         </div>
       ` : `
-        <div class="field">
-          <label>Sacando agora (nosso lado)</label>
-          <div class="seg">
-            <button type="button" class="${ja.sacadorId===atleta1.id?'on':''}" onclick="definirSacador('${atleta1.id}')">${escapeHtml(atleta1.apelido || atleta1.nome)}</button>
-            <button type="button" class="${ja.sacadorId===atleta2.id?'on':''}" onclick="definirSacador('${atleta2.id}')">${escapeHtml(atleta2.apelido || atleta2.nome)}</button>
-          </div>
-        </div>
-
         ${ja.passo === null ? `
           <div class="scout-lado">
             <button type="button" class="scout-lado-btn nos" onclick="escolherLado('nos')" ${ja.salvando?'disabled':''}>PONTO NOSSO</button>
             <button type="button" class="scout-lado-btn eles" onclick="escolherLado('eles')" ${ja.salvando?'disabled':''}>PONTO DELES</button>
           </div>
-        ` : `
+        ` : ja.acaoEscolhida === null ? `
           <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
             <p class="muted" style="margin:0;flex:1">${ja.passo==='nos' ? 'Ponto nosso — como?' : 'Ponto deles — como?'}</p>
             <button type="button" class="btn btn-ghost btn-sm" onclick="cancelarPasso()">Cancelar</button>
@@ -1930,18 +1940,32 @@ function renderScout(){
           <div class="scout-grid">
             ${ja.passo === 'nos' ? `
               ${[atleta1, atleta2].map(at => `
-                <button type="button" class="scout-btn" onclick="registrarPonto('nos','ataque','${at.id}')" ${ja.salvando?'disabled':''}>Ataque<br><span>${escapeHtml(at.apelido || at.nome)}</span></button>
-                <button type="button" class="scout-btn" onclick="registrarPonto('nos','saque','${at.id}')" ${ja.salvando?'disabled':''}>Ace<br><span>${escapeHtml(at.apelido || at.nome)}</span></button>
-                <button type="button" class="scout-btn" onclick="registrarPonto('nos','bloqueio','${at.id}')" ${ja.salvando?'disabled':''}>Bloqueio<br><span>${escapeHtml(at.apelido || at.nome)}</span></button>
+                <button type="button" class="scout-btn" onclick="escolherAcao('nos','ataque','${at.id}')" ${ja.salvando?'disabled':''}>Ataque<br><span>${escapeHtml(at.apelido || at.nome)}</span></button>
+                <button type="button" class="scout-btn" onclick="escolherAcao('nos','saque','${at.id}')" ${ja.salvando?'disabled':''}>Saque<br><span>${escapeHtml(at.apelido || at.nome)}</span></button>
+                <button type="button" class="scout-btn" onclick="escolherAcao('nos','bloqueio','${at.id}')" ${ja.salvando?'disabled':''}>Bloqueio<br><span>${escapeHtml(at.apelido || at.nome)}</span></button>
               `).join('')}
-              <button type="button" class="scout-btn" onclick="registrarPonto('nos','erro_adversario', null)" ${ja.salvando?'disabled':''}>Erro do<br><span>adversário</span></button>
-              <button type="button" class="scout-btn" onclick="registrarPonto('nos','outro', null)" ${ja.salvando?'disabled':''}>Outro</button>
+              <button type="button" class="scout-btn" onclick="escolherAcao('nos','erro_adversario', null)" ${ja.salvando?'disabled':''}>Erro do<br><span>adversário</span></button>
+              <button type="button" class="scout-btn" onclick="escolherAcao('nos','outro', null)" ${ja.salvando?'disabled':''}>Outro</button>
             ` : `
-              <button type="button" class="scout-btn" onclick="registrarPonto('eles','ataque', null)" ${ja.salvando?'disabled':''}>Ataque<br><span>deles</span></button>
-              <button type="button" class="scout-btn" onclick="registrarPonto('eles','saque', null)" ${ja.salvando?'disabled':''}>Ace<br><span>deles</span></button>
-              <button type="button" class="scout-btn" onclick="registrarPonto('eles','bloqueio', null)" ${ja.salvando?'disabled':''}>Bloqueio<br><span>deles</span></button>
-              <button type="button" class="scout-btn" onclick="registrarPonto('eles','outro', null)" ${ja.salvando?'disabled':''}>Outro</button>
+              <button type="button" class="scout-btn" onclick="escolherAcao('eles','ataque', null)" ${ja.salvando?'disabled':''}>Ataque<br><span>deles</span></button>
+              <button type="button" class="scout-btn" onclick="escolherAcao('eles','saque', null)" ${ja.salvando?'disabled':''}>Saque<br><span>deles</span></button>
+              <button type="button" class="scout-btn" onclick="escolherAcao('eles','bloqueio', null)" ${ja.salvando?'disabled':''}>Bloqueio<br><span>deles</span></button>
+              <button type="button" class="scout-btn" onclick="escolherAcao('eles','outro', null)" ${ja.salvando?'disabled':''}>Outro</button>
             `}
+          </div>
+        ` : `
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+            <p class="muted" style="margin:0;flex:1">
+              ${labelOrigem(ja.acaoEscolhida.origem)}${ja.acaoEscolhida.atletaId ? ' — ' + escapeHtml(nomeAtletaCurto(ja.acaoEscolhida.atletaId)) : ''} · qual foi o detalhe?
+            </p>
+            <button type="button" class="btn btn-ghost btn-sm" onclick="cancelarAcao()">Voltar</button>
+          </div>
+          <div class="scout-grid">
+            ${(state.subtipos || []).filter(s => s.origem === ja.acaoEscolhida.origem).map(s => `
+              <button type="button" class="scout-btn"
+                onclick="registrarPonto('${ja.acaoEscolhida.ladoVencedor}','${ja.acaoEscolhida.origem}',${ja.acaoEscolhida.atletaId ? `'${ja.acaoEscolhida.atletaId}'` : 'null'},${s.id})"
+                ${ja.salvando?'disabled':''}>${escapeHtml(s.nome)}</button>
+            `).join('')}
           </div>
         `}
 
