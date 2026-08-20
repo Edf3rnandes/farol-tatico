@@ -993,7 +993,13 @@ function nomeAtletaCurto(id){
 }
 
 function labelOrigem(o){
-  return { ataque:'Ataque', saque:'Saque', bloqueio:'Bloqueio', erro_adversario:'Erro do adversário', outro:'Outro' }[o] || o;
+  return { ataque:'Ataque', saque:'Saque', bloqueio:'Bloqueio', erro_adversario:'Erro do adversário', erro_nosso:'Erro nosso', outro:'Outro' }[o] || o;
+}
+
+function nomeAdversario(ja, num){
+  if (num === 1) return ja.jogo.adversarios?.atleta_1_nome || 'Adversário 1';
+  if (num === 2) return ja.jogo.adversarios?.atleta_2_nome || 'Adversário 2';
+  return '';
 }
 
 async function abrirScout(jogoId){
@@ -1016,16 +1022,16 @@ async function abrirScout(jogoId){
   state.jogoAtual = {
     carregando: false,
     jogo, sets, setAtualId: setAtual.id, rallies: rallies || [],
-    passo: null, acaoEscolhida: null, salvando: false,
+    passo: null, acaoEscolhida: null, salvando: false, avisoSet: null,
     finalizado: jogo.sets_pro === 2 || jogo.sets_contra === 2,
   };
   render();
 }
 
-// Fundamentos com detalhe (direção/tipo). Pra estes, depois de escolher quem fez
-// a ação a gente ainda pergunta o detalhe antes de gravar. Erro do adversário e
-// Outro não têm detalhe — gravam na hora.
-const ORIGENS_COM_DETALHE = ['ataque', 'saque', 'bloqueio'];
+// Fundamentos com detalhe (direção/tipo/o-que-errou). Pra estes, depois de
+// escolher quem fez a ação a gente ainda pergunta o detalhe antes de gravar.
+// Erro do adversário e Outro não têm detalhe — gravam na hora.
+const ORIGENS_COM_DETALHE = ['ataque', 'saque', 'bloqueio', 'erro_nosso'];
 
 function escolherLado(lado){
   state.jogoAtual.passo = lado;
@@ -1039,14 +1045,16 @@ function cancelarPasso(){
   render();
 }
 
-// Passo intermediário: se o fundamento tem detalhe (ataque/saque/bloqueio),
-// mostra os botões de detalhe (paralela, flutuado, etc). Senão grava direto.
-function escolherAcao(ladoVencedor, origem, atletaId){
+// Passo intermediário: se o fundamento tem detalhe (ataque/saque/bloqueio/erro
+// nosso), mostra os botões de detalhe (paralela, flutuado, erro de passe...).
+// Senão grava direto. adversarioNum = qual dos dois adversários (1 ou 2),
+// só usado quando o ponto foi deles por ação boa deles.
+function escolherAcao(ladoVencedor, origem, atletaId, adversarioNum){
   if (!ORIGENS_COM_DETALHE.includes(origem)){
-    registrarPonto(ladoVencedor, origem, atletaId, null);
+    registrarPonto(ladoVencedor, origem, atletaId, null, adversarioNum || null);
     return;
   }
-  state.jogoAtual.acaoEscolhida = { ladoVencedor, origem, atletaId };
+  state.jogoAtual.acaoEscolhida = { ladoVencedor, origem, atletaId, adversarioNum: adversarioNum || null };
   render();
 }
 
@@ -1066,7 +1074,7 @@ function sacadorLadoParaProximaRally(){
   return ja.rallies[ja.rallies.length - 1].ponto_para;
 }
 
-async function registrarPonto(ladoVencedor, origem, atletaId, subtipoId){
+async function registrarPonto(ladoVencedor, origem, atletaId, subtipoId, adversarioNum){
   const ja = state.jogoAtual;
   if (ja.salvando) return;
 
@@ -1087,6 +1095,7 @@ async function registrarPonto(ladoVencedor, origem, atletaId, subtipoId){
     origem,
     atleta_id: atletaId || null,
     subtipo_id: subtipoId || null,
+    adversario_num: adversarioNum || null,
     sacador_lado: sacadorLado,
     sacador_atleta_id: null,
     placar_pro: novoPro,
@@ -1124,12 +1133,14 @@ async function checarFimDeSet(){
   await sb.from('jogos').update({ sets_pro: ja.jogo.sets_pro, sets_contra: ja.jogo.sets_contra }).eq('id', ja.jogo.id);
 
   if (ja.jogo.sets_pro === 2 || ja.jogo.sets_contra === 2){
-    toast(`Set encerrado ${p}-${c}. Jogo finalizado: ${ja.jogo.sets_pro} × ${ja.jogo.sets_contra}!`, 'ok');
     ja.finalizado = true;
+    ja.avisoSet = {
+      tipo: 'jogo', numeroSetEncerrado: setAtual.numero, pontosPro: p, pontosContra: c,
+      setsPro: ja.jogo.sets_pro, setsContra: ja.jogo.sets_contra,
+    };
     return;
   }
 
-  toast(`Set encerrado ${p}-${c}. Abrindo o próximo set…`, 'ok');
   const resp = await sb.from('sets').insert({
     jogo_id: ja.jogo.id, numero: setAtual.numero + 1,
     lado_inicial: setAtual.lado_inicial === 'A' ? 'B' : 'A',
@@ -1139,6 +1150,15 @@ async function checarFimDeSet(){
   ja.sets.push(resp.data);
   ja.setAtualId = resp.data.id;
   ja.rallies = [];
+  ja.avisoSet = {
+    tipo: 'set', numeroSetEncerrado: setAtual.numero, pontosPro: p, pontosContra: c,
+    proximoSetNumero: resp.data.numero,
+  };
+}
+
+function confirmarAvisoSet(){
+  state.jogoAtual.avisoSet = null;
+  render();
 }
 
 async function desfazerUltimoPonto(){
@@ -1882,6 +1902,7 @@ function renderTimelineRallies(ja){
             </div>
             <div class="meta" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
               ${r.atleta_id ? `<span>${escapeHtml(nomeAtletaCurto(r.atleta_id))}</span>` : ''}
+              ${r.adversario_num ? `<span>${escapeHtml(nomeAdversario(ja, r.adversario_num))}</span>` : ''}
               ${opcoes.length ? `
                 <select onchange="definirSubtipoRally('${r.id}', this.value)"
                         style="background:var(--card);border:1px solid var(--line);color:var(--tx2);
@@ -1922,7 +1943,18 @@ function renderScout(){
         <div class="placar-set">${setAtual.pontos_pro} <span style="color:var(--tx3);font-size:1.6rem">×</span> ${setAtual.pontos_contra}</div>
       </div>
 
-      ${ja.finalizado ? `
+      ${ja.avisoSet ? `
+        <div class="card" style="text-align:center;margin-bottom:16px;border-color:var(--a)">
+          <h2 style="margin-bottom:6px">${ja.avisoSet.tipo === 'jogo' ? 'Jogo encerrado!' : `Set ${ja.avisoSet.numeroSetEncerrado} encerrado`}</h2>
+          <p class="muted" style="margin-bottom:14px">
+            Resultado do set: ${ja.avisoSet.pontosPro} × ${ja.avisoSet.pontosContra}
+            ${ja.avisoSet.tipo === 'jogo' ? `<br>Placar final: ${ja.avisoSet.setsPro} × ${ja.avisoSet.setsContra} sets` : ''}
+          </p>
+          <button type="button" class="btn btn-primary" onclick="confirmarAvisoSet()">
+            ${ja.avisoSet.tipo === 'jogo' ? 'Ok' : `Começar o Set ${ja.avisoSet.proximoSetNumero}`}
+          </button>
+        </div>
+      ` : ja.finalizado ? `
         <div class="card" style="text-align:center;margin-bottom:16px">
           <div class="ok-check" style="justify-content:center;display:flex">Jogo encerrado.</div>
         </div>
@@ -1947,23 +1979,28 @@ function renderScout(){
               <button type="button" class="scout-btn" onclick="escolherAcao('nos','erro_adversario', null)" ${ja.salvando?'disabled':''}>Erro do<br><span>adversário</span></button>
               <button type="button" class="scout-btn" onclick="escolherAcao('nos','outro', null)" ${ja.salvando?'disabled':''}>Outro</button>
             ` : `
-              <button type="button" class="scout-btn" onclick="escolherAcao('eles','ataque', null)" ${ja.salvando?'disabled':''}>Ataque<br><span>deles</span></button>
-              <button type="button" class="scout-btn" onclick="escolherAcao('eles','saque', null)" ${ja.salvando?'disabled':''}>Saque<br><span>deles</span></button>
-              <button type="button" class="scout-btn" onclick="escolherAcao('eles','bloqueio', null)" ${ja.salvando?'disabled':''}>Bloqueio<br><span>deles</span></button>
+              ${[1, ja.jogo.adversarios?.atleta_2_nome ? 2 : null].filter(Boolean).map(num => `
+                <button type="button" class="scout-btn" onclick="escolherAcao('eles','ataque', null, ${num})" ${ja.salvando?'disabled':''}>Ataque<br><span>${escapeHtml(nomeAdversario(ja, num))}</span></button>
+                <button type="button" class="scout-btn" onclick="escolherAcao('eles','saque', null, ${num})" ${ja.salvando?'disabled':''}>Saque<br><span>${escapeHtml(nomeAdversario(ja, num))}</span></button>
+                <button type="button" class="scout-btn" onclick="escolherAcao('eles','bloqueio', null, ${num})" ${ja.salvando?'disabled':''}>Bloqueio<br><span>${escapeHtml(nomeAdversario(ja, num))}</span></button>
+              `).join('')}
+              ${[atleta1, atleta2].map(at => `
+                <button type="button" class="scout-btn" onclick="escolherAcao('eles','erro_nosso','${at.id}')" ${ja.salvando?'disabled':''}>Erro nosso<br><span>${escapeHtml(at.apelido || at.nome)}</span></button>
+              `).join('')}
               <button type="button" class="scout-btn" onclick="escolherAcao('eles','outro', null)" ${ja.salvando?'disabled':''}>Outro</button>
             `}
           </div>
         ` : `
           <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
             <p class="muted" style="margin:0;flex:1">
-              ${labelOrigem(ja.acaoEscolhida.origem)}${ja.acaoEscolhida.atletaId ? ' — ' + escapeHtml(nomeAtletaCurto(ja.acaoEscolhida.atletaId)) : ''} · qual foi o detalhe?
+              ${labelOrigem(ja.acaoEscolhida.origem)}${ja.acaoEscolhida.atletaId ? ' — ' + escapeHtml(nomeAtletaCurto(ja.acaoEscolhida.atletaId)) : ''}${ja.acaoEscolhida.adversarioNum ? ' — ' + escapeHtml(nomeAdversario(ja, ja.acaoEscolhida.adversarioNum)) : ''} · qual foi o detalhe?
             </p>
             <button type="button" class="btn btn-ghost btn-sm" onclick="cancelarAcao()">Voltar</button>
           </div>
           <div class="scout-grid">
             ${(state.subtipos || []).filter(s => s.origem === ja.acaoEscolhida.origem).map(s => `
               <button type="button" class="scout-btn"
-                onclick="registrarPonto('${ja.acaoEscolhida.ladoVencedor}','${ja.acaoEscolhida.origem}',${ja.acaoEscolhida.atletaId ? `'${ja.acaoEscolhida.atletaId}'` : 'null'},${s.id})"
+                onclick="registrarPonto('${ja.acaoEscolhida.ladoVencedor}','${ja.acaoEscolhida.origem}',${ja.acaoEscolhida.atletaId ? `'${ja.acaoEscolhida.atletaId}'` : 'null'},${s.id},${ja.acaoEscolhida.adversarioNum || 'null'})"
                 ${ja.salvando?'disabled':''}>${escapeHtml(s.nome)}</button>
             `).join('')}
           </div>
