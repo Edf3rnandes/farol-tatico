@@ -238,11 +238,12 @@ let state = {
   sessaoAtual: null,        // sessão aberta (detalhe), com presenças carregadas
 
   // jogos / scout
-  jogosCarregados: false,
-  jogos: [],
   competicoesCarregadas: false,
   competicoes: [],
   subtipos: null,           // vocabulário do scout (ft.subtipos_acao), carregado uma vez
+  eventoAtualId: null,      // id da competição (evento) aberta
+  eventoAtual: null,        // { competicao, duplas (com resultados_competicao embutido), jogos }
+  novoEvento: null,         // form de novo evento
   novoJogo: null,           // form de novo jogo
   jogoAtual: null,          // jogo aberto na tela de scout, com sets e rallies carregados
 };
@@ -376,9 +377,9 @@ async function irParaAba(aba){
     return;
   }
   if (aba === 'jogos'){
-    state.view = 'jogos';
+    state.view = 'eventos';
     render();
-    if (!state.jogosCarregados) await carregarJogos();
+    if (!state.competicoesCarregadas) await carregarCompeticoes();
     render();
     return;
   }
@@ -852,16 +853,6 @@ const FASES_JOGO = [
 ];
 function labelFase(f){ const par = FASES_JOGO.find(([c]) => c === f); return par ? par[1] : f; }
 
-async function carregarJogos(){
-  const { data, error } = await sb.from('jogos')
-    .select('*, duplas(atleta_1_id, atleta_2_id), adversarios(atleta_1_nome, atleta_2_nome, equipe), competicoes(nome, nivel)')
-    .order('criado_em', { ascending: false })
-    .limit(60);
-  if (error){ toast('Erro ao carregar jogos: ' + error.message, 'err'); return; }
-  state.jogos = data || [];
-  state.jogosCarregados = true;
-}
-
 async function carregarCompeticoes(){
   const { data, error } = await sb.from('competicoes').select('*').order('data_inicio', { ascending: false });
   if (error){ toast('Erro ao carregar competições: ' + error.message, 'err'); return; }
@@ -875,36 +866,121 @@ async function carregarSubtipos(){
   state.subtipos = data || [];
 }
 
-async function voltarParaJogos(){
-  state.view = 'jogos';
+async function voltarParaEventos(){
+  state.view = 'eventos';
+  state.eventoAtualId = null;
+  state.eventoAtual = null;
   state.novoJogo = null;
   state.jogoAtual = null;
   render();
-  if (!state.jogosCarregados){ await carregarJogos(); render(); }
+  if (!state.competicoesCarregadas){ await carregarCompeticoes(); render(); }
+}
+
+async function voltarParaEvento(){
+  state.novoJogo = null;
+  state.jogoAtual = null;
+  if (!state.eventoAtualId){ await voltarParaEventos(); return; }
+  await abrirEvento(state.eventoAtualId);
+}
+
+/* -------- eventos (competições) -------- */
+
+async function abrirEvento(competicaoId){
+  state.view = 'evento-detalhe';
+  state.eventoAtualId = competicaoId;
+  state.eventoAtual = { carregando: true };
+  render();
+
+  const [{ data: competicao, error: e1 }, { data: duplas, error: e2 }, { data: jogos, error: e3 }] = await Promise.all([
+    sb.from('competicoes').select('*').eq('id', competicaoId).single(),
+    sb.from('duplas').select('*, resultados_competicao(*)').eq('competicao_id', competicaoId),
+    sb.from('jogos')
+      .select('*, duplas(atleta_1_id, atleta_2_id), adversarios(atleta_1_nome, atleta_2_nome)')
+      .eq('competicao_id', competicaoId).order('criado_em', { ascending: false }),
+  ]);
+  if (e1 || e2 || e3){
+    toast('Erro ao abrir o evento: ' + (e1 || e2 || e3).message, 'err');
+    voltarParaEventos();
+    return;
+  }
+
+  state.eventoAtual = { carregando: false, competicao, duplas: duplas || [], jogos: jogos || [] };
+  render();
+}
+
+function abrirNovoEvento(){
+  state.view = 'evento-novo';
+  state.novoEvento = {
+    nome: '', nivel: 'estadual', data_inicio: new Date().toISOString().slice(0,10),
+    cidade: '', uf: '',
+  };
+  render();
+}
+
+function sincronizarNovoEventoDoDom(){
+  const n = state.novoEvento;
+  const g = (id) => document.getElementById(id);
+  if (g('ne-nome'))   n.nome = g('ne-nome').value;
+  if (g('ne-data'))   n.data_inicio = g('ne-data').value;
+  if (g('ne-nivel'))  n.nivel = g('ne-nivel').value;
+  if (g('ne-cidade')) n.cidade = g('ne-cidade').value;
+  if (g('ne-uf'))     n.uf = g('ne-uf').value;
+}
+
+async function salvarNovoEvento(ev){
+  ev.preventDefault();
+  sincronizarNovoEventoDoDom();
+  const n = state.novoEvento;
+
+  if (!n.nome){ toast('Dá um nome pro evento.', 'err'); return; }
+  if (!n.data_inicio){ toast('Preenche a data de início.', 'err'); return; }
+
+  const resp = await sb.from('competicoes').insert({
+    nome: n.nome, nivel: n.nivel, data_inicio: n.data_inicio,
+    cidade: n.cidade || null, uf: n.uf || null,
+  }).select().single();
+  if (resp.error){ toast('Erro ao criar o evento: ' + resp.error.message, 'err'); return; }
+
+  state.competicoesCarregadas = false; // recarrega a lista na próxima vez que abrir
+  toast('Evento criado.', 'ok');
+  await abrirEvento(resp.data.id);
+}
+
+async function salvarClassificacao(duplaId){
+  const g = (id) => document.getElementById(id);
+  const dados = {
+    dupla_id: duplaId,
+    colocacao: g('rc-colocacao-'+duplaId)?.value ? Number(g('rc-colocacao-'+duplaId).value) : null,
+    vitorias: g('rc-vitorias-'+duplaId)?.value ? Number(g('rc-vitorias-'+duplaId).value) : 0,
+    derrotas: g('rc-derrotas-'+duplaId)?.value ? Number(g('rc-derrotas-'+duplaId).value) : 0,
+    observacoes: g('rc-obs-'+duplaId)?.value || null,
+  };
+
+  const resp = await sb.from('resultados_competicao').upsert(dados, { onConflict: 'dupla_id' }).select().single();
+  if (resp.error){ toast('Erro ao salvar a classificação: ' + resp.error.message, 'err'); return; }
+
+  const d = state.eventoAtual.duplas.find(x => x.id === duplaId);
+  if (d) d.resultados_competicao = resp.data;
+  toast('Classificação salva.', 'ok');
+  render();
 }
 
 /* -------- novo jogo -------- */
 
-async function abrirNovoJogo(){
+function abrirNovoJogo(){
+  if (!state.eventoAtualId){ toast('Abra um evento primeiro.', 'err'); return; }
   state.view = 'jogo-novo';
   state.novoJogo = {
-    competicao_id: '', nova_competicao_nome: '', nova_competicao_nivel: 'estadual',
-    nova_competicao_data: new Date().toISOString().slice(0,10),
     atleta_1_id: '', atleta_2_id: '',
     adv_1_nome: '', adv_2_nome: '', adv_equipe: '', adv_uf: '',
     fase: 'grupo', quadra: '', vento: '', sol: '',
   };
   render();
-  if (!state.competicoesCarregadas) { await carregarCompeticoes(); render(); }
 }
 
 function sincronizarNovoJogoDoDom(){
   const n = state.novoJogo;
   const g = (id) => document.getElementById(id);
-  if (g('nj-competicao')) n.competicao_id = g('nj-competicao').value;
-  if (g('nj-nc-nome'))    n.nova_competicao_nome = g('nj-nc-nome').value;
-  if (g('nj-nc-data'))    n.nova_competicao_data = g('nj-nc-data').value;
-  if (g('nj-nc-nivel'))   n.nova_competicao_nivel = g('nj-nc-nivel').value;
   if (g('nj-atleta1'))    n.atleta_1_id = g('nj-atleta1').value;
   if (g('nj-atleta2'))    n.atleta_2_id = g('nj-atleta2').value;
   if (g('nj-adv1'))       n.adv_1_nome = g('nj-adv1').value;
@@ -917,32 +993,16 @@ function sincronizarNovoJogoDoDom(){
   if (g('nj-sol'))        n.sol = g('nj-sol').value;
 }
 
-function mudarCompeticaoNovoJogo(v){
-  sincronizarNovoJogoDoDom();
-  state.novoJogo.competicao_id = v;
-  render();
-}
-
 async function salvarNovoJogo(ev){
   ev.preventDefault();
   sincronizarNovoJogoDoDom();
   const n = state.novoJogo;
+  const competicaoId = state.eventoAtualId;
 
-  if (!n.competicao_id){ toast('Escolhe ou cria uma competição.', 'err'); return; }
+  if (!competicaoId){ toast('Abra um evento primeiro.', 'err'); return; }
   if (!n.atleta_1_id || !n.atleta_2_id){ toast('Escolhe os dois atletas da dupla.', 'err'); return; }
   if (n.atleta_1_id === n.atleta_2_id){ toast('Escolhe dois atletas diferentes.', 'err'); return; }
   if (!n.adv_1_nome){ toast('Preenche pelo menos o nome de um adversário.', 'err'); return; }
-
-  let competicaoId = n.competicao_id;
-  if (competicaoId === '__nova__'){
-    if (!n.nova_competicao_nome){ toast('Dá um nome pra competição.', 'err'); return; }
-    if (!n.nova_competicao_data){ toast('Preenche a data de início da competição.', 'err'); return; }
-    const resp = await sb.from('competicoes').insert({
-      nome: n.nova_competicao_nome, nivel: n.nova_competicao_nivel, data_inicio: n.nova_competicao_data,
-    }).select().single();
-    if (resp.error){ toast('Erro ao criar competição: ' + resp.error.message, 'err'); return; }
-    competicaoId = resp.data.id;
-  }
 
   const duplaExistente = await sb.from('duplas').select('id')
     .eq('competicao_id', competicaoId).eq('atleta_1_id', n.atleta_1_id).eq('atleta_2_id', n.atleta_2_id)
@@ -971,7 +1031,6 @@ async function salvarNovoJogo(ev){
   const setResp = await sb.from('sets').insert({ jogo_id: jogoResp.data.id, numero: 1, lado_inicial: 'A' }).select().single();
   if (setResp.error){ toast('Erro ao criar o primeiro set: ' + setResp.error.message, 'err'); return; }
 
-  state.jogosCarregados = false; // recarrega a lista na próxima vez que abrir
   toast('Jogo criado. Bora marcar!', 'ok');
   await abrirScout(jogoResp.data.id);
 }
@@ -1013,7 +1072,7 @@ async function abrirScout(jogoId){
     sb.from('jogos').select('*, duplas(id, atleta_1_id, atleta_2_id), adversarios(*), competicoes(nome, nivel)').eq('id', jogoId).single(),
     sb.from('sets').select('*').eq('jogo_id', jogoId).order('numero'),
   ]);
-  if (e1 || e2){ toast('Erro ao abrir o jogo: ' + (e1 || e2).message, 'err'); voltarParaJogos(); return; }
+  if (e1 || e2){ toast('Erro ao abrir o jogo: ' + (e1 || e2).message, 'err'); voltarParaEvento(); return; }
 
   const setAtual = sets[sets.length - 1];
   const { data: rallies, error: e3 } = await sb.from('rallies').select('*').eq('set_id', setAtual.id).order('numero');
@@ -1224,9 +1283,11 @@ function render(){
   if (state.view === 'sessoes')       return renderSessoes();
   if (state.view === 'sessao-edit')   return renderSessaoEdit();
   if (state.view === 'sessao-detail') return renderSessaoDetail();
-  if (state.view === 'jogos')         return renderJogos();
-  if (state.view === 'jogo-novo')     return renderNovoJogo();
-  if (state.view === 'jogo-scout')    return renderScout();
+  if (state.view === 'eventos')         return renderEventos();
+  if (state.view === 'evento-novo')     return renderNovoEvento();
+  if (state.view === 'evento-detalhe')  return renderEventoDetalhe();
+  if (state.view === 'jogo-novo')       return renderNovoJogo();
+  if (state.view === 'jogo-scout')      return renderScout();
 }
 
 function logoSvg(){
@@ -1753,19 +1814,115 @@ function renderSessaoDetail(){
     </div>`;
 }
 
-/* ---------------------------- render: jogos ---------------------------- */
+/* ---------------------------- render: eventos ---------------------------- */
 
-function renderJogos(){
+function renderEventos(){
   app.innerHTML = `
     ${renderTopbar()}
     <div class="main">
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
-        <h1 style="flex:1">Jogos</h1>
-        <button class="btn btn-primary" onclick="abrirNovoJogo()">+ Novo jogo</button>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
+        <h1 style="flex:1">Eventos</h1>
+        <button class="btn btn-primary" onclick="abrirNovoEvento()">+ Novo evento</button>
       </div>
+      <p class="muted">${state.competicoes.length} evento${state.competicoes.length===1?'':'s'} cadastrado${state.competicoes.length===1?'':'s'}</p>
 
-      ${state.jogos.length === 0 ? `<div class="empty">Nenhum jogo registrado ainda.</div>` :
-        state.jogos.map(j => {
+      ${state.competicoes.length === 0 ? `<div class="empty">Nenhum evento cadastrado ainda.</div>` :
+        state.competicoes.map(c => `
+          <div class="list-item" onclick="abrirEvento('${c.id}')">
+            <div class="top">
+              <div class="titulo">${escapeHtml(c.nome)}</div>
+              <span class="pill">${escapeHtml(c.nivel)}</span>
+            </div>
+            <div class="meta">
+              ${new Date(c.data_inicio+'T00:00:00').toLocaleDateString('pt-BR')}
+              ${c.cidade ? ' · ' + escapeHtml(c.cidade) + (c.uf ? '/' + escapeHtml(c.uf) : '') : ''}
+            </div>
+          </div>
+        `).join('')}
+    </div>`;
+}
+
+function renderNovoEvento(){
+  const n = state.novoEvento;
+  app.innerHTML = `
+    ${renderTopbar()}
+    <div class="main">
+      <button class="btn btn-ghost btn-sm" style="margin-bottom:14px" onclick="voltarParaEventos()">← Voltar</button>
+      <h1>Novo evento</h1>
+      <p class="muted" style="margin-bottom:20px">Depois de criar, você adiciona os jogos e a classificação das nossas duplas.</p>
+
+      <div class="card">
+        <form onsubmit="salvarNovoEvento(event)">
+          <div class="field">
+            <label>Nome do evento *</label>
+            <input id="ne-nome" value="${escapeHtml(n.nome)}" required>
+          </div>
+          <div class="row2">
+            <div class="field"><label>Data de início *</label><input id="ne-data" type="date" value="${n.data_inicio}" required></div>
+            <div class="field">
+              <label>Nível</label>
+              <select id="ne-nivel">
+                ${NIVEIS_COMPETICAO.map(([c,l]) => `<option value="${c}" ${n.nivel===c?'selected':''}>${l}</option>`).join('')}
+              </select>
+            </div>
+          </div>
+          <div class="row2">
+            <div class="field"><label>Cidade</label><input id="ne-cidade" value="${escapeHtml(n.cidade)}"></div>
+            <div class="field"><label>UF</label><input id="ne-uf" maxlength="2" style="text-transform:uppercase" value="${escapeHtml(n.uf)}"></div>
+          </div>
+          <div class="ficha-actions">
+            <button type="submit" class="btn btn-primary">Criar evento</button>
+            <button type="button" class="btn btn-ghost" onclick="voltarParaEventos()">Cancelar</button>
+          </div>
+        </form>
+      </div>
+    </div>`;
+}
+
+function renderEventoDetalhe(){
+  const ev = state.eventoAtual;
+  if (!ev || ev.carregando){
+    app.innerHTML = `${renderTopbar()}<div class="center-screen"><div class="spinner"></div></div>`;
+    return;
+  }
+  const c = ev.competicao;
+
+  app.innerHTML = `
+    ${renderTopbar()}
+    <div class="main">
+      <button class="btn btn-ghost btn-sm" style="margin-bottom:14px" onclick="voltarParaEventos()">← Voltar</button>
+      <h1>${escapeHtml(c.nome)}</h1>
+      <p class="muted" style="margin-bottom:20px">
+        ${escapeHtml(c.nivel)} · ${new Date(c.data_inicio+'T00:00:00').toLocaleDateString('pt-BR')}
+        ${c.cidade ? ' · ' + escapeHtml(c.cidade) + (c.uf ? '/' + escapeHtml(c.uf) : '') : ''}
+      </p>
+
+      <div class="section-title">Classificação das nossas duplas</div>
+      ${ev.duplas.length === 0 ? `<div class="empty">Nenhuma dupla registrada neste evento ainda — cria um jogo abaixo que a dupla entra automaticamente.</div>` :
+        ev.duplas.map(d => {
+          const a1 = state.atletas.find(a => a.id === d.atleta_1_id);
+          const a2 = state.atletas.find(a => a.id === d.atleta_2_id);
+          const nomes = [a1?.apelido || a1?.nome, a2?.apelido || a2?.nome].filter(Boolean).join(' / ');
+          const r = d.resultados_competicao || {};
+          return `
+            <div class="card" style="margin-bottom:10px">
+              <div style="font-weight:700;margin-bottom:10px">${escapeHtml(nomes || 'Dupla')}</div>
+              <div class="row3">
+                <div class="field"><label>Colocação</label><input id="rc-colocacao-${d.id}" type="number" min="1" value="${r.colocacao ?? ''}"></div>
+                <div class="field"><label>Vitórias</label><input id="rc-vitorias-${d.id}" type="number" min="0" value="${r.vitorias ?? 0}"></div>
+                <div class="field"><label>Derrotas</label><input id="rc-derrotas-${d.id}" type="number" min="0" value="${r.derrotas ?? 0}"></div>
+              </div>
+              <div class="field"><label>Observações</label><textarea id="rc-obs-${d.id}">${escapeHtml(r.observacoes)}</textarea></div>
+              <button type="button" class="btn btn-sm" onclick="salvarClassificacao('${d.id}')">Salvar classificação</button>
+            </div>`;
+        }).join('')}
+
+      <div style="display:flex;align-items:center;gap:10px;margin:26px 0 16px">
+        <h2 style="flex:1;font-size:1.02rem;margin:0">Jogos</h2>
+        <button class="btn btn-primary btn-sm" onclick="abrirNovoJogo()">+ Novo jogo</button>
+      </div>
+      ${ev.jogos.length === 0 ? `<div class="empty">Nenhum jogo registrado neste evento ainda.</div>` :
+        ev.jogos.map(j => {
           const a1 = state.atletas.find(a => a.id === j.duplas?.atleta_1_id);
           const a2 = state.atletas.find(a => a.id === j.duplas?.atleta_2_id);
           const nomesDupla = [a1?.apelido || a1?.nome, a2?.apelido || a2?.nome].filter(Boolean).join(' / ');
@@ -1777,7 +1934,7 @@ function renderJogos(){
                 <span class="pill">${j.sets_pro} × ${j.sets_contra}</span>
               </div>
               <div class="meta">
-                ${j.competicoes ? escapeHtml(j.competicoes.nome) : ''} · ${labelFase(j.fase)}
+                ${labelFase(j.fase)}
                 ${j.data_hora ? ' · ' + new Date(j.data_hora).toLocaleDateString('pt-BR') : ''}
               </div>
             </div>`;
@@ -1788,39 +1945,18 @@ function renderJogos(){
 function renderNovoJogo(){
   const n = state.novoJogo;
   const atletasAtivos = state.atletas.filter(a => a.status === 'ativo');
+  const nomeEvento = state.eventoAtual?.competicao?.nome || '';
 
   app.innerHTML = `
     ${renderTopbar()}
     <div class="main">
-      <button class="btn btn-ghost btn-sm" style="margin-bottom:14px" onclick="voltarParaJogos()">← Voltar</button>
+      <button class="btn btn-ghost btn-sm" style="margin-bottom:14px" onclick="voltarParaEvento()">← Voltar</button>
       <h1>Novo jogo</h1>
-      <p class="muted" style="margin-bottom:20px">Depois de salvar, já abre a tela de marcar os pontos.</p>
+      <p class="muted" style="margin-bottom:20px">${nomeEvento ? escapeHtml(nomeEvento) + ' — ' : ''}Depois de salvar, já abre a tela de marcar os pontos.</p>
 
       <div class="card">
         <form onsubmit="salvarNovoJogo(event)">
-          <div class="section-title">Competição</div>
-          <div class="field">
-            <label>Competição *</label>
-            <select id="nj-competicao" onchange="mudarCompeticaoNovoJogo(this.value)">
-              <option value="">Selecione…</option>
-              <option value="__nova__" ${n.competicao_id==='__nova__'?'selected':''}>+ Nova competição</option>
-              ${state.competicoes.map(c => `<option value="${c.id}" ${n.competicao_id===c.id?'selected':''}>${escapeHtml(c.nome)} (${c.nivel})</option>`).join('')}
-            </select>
-          </div>
-          ${n.competicao_id === '__nova__' ? `
-            <div class="row2">
-              <div class="field"><label>Nome da competição *</label><input id="nj-nc-nome" value="${escapeHtml(n.nova_competicao_nome)}"></div>
-              <div class="field"><label>Data de início *</label><input id="nj-nc-data" type="date" value="${n.nova_competicao_data}"></div>
-            </div>
-            <div class="field">
-              <label>Nível</label>
-              <select id="nj-nc-nivel">
-                ${NIVEIS_COMPETICAO.map(([c,l]) => `<option value="${c}" ${n.nova_competicao_nivel===c?'selected':''}>${l}</option>`).join('')}
-              </select>
-            </div>
-          ` : ''}
-
-          <div class="section-title" style="margin-top:20px">Nossa dupla</div>
+          <div class="section-title">Nossa dupla</div>
           <div class="row2">
             <div class="field">
               <label>Atleta 1 *</label>
@@ -1880,7 +2016,7 @@ function renderNovoJogo(){
 
           <div class="ficha-actions">
             <button type="submit" class="btn btn-primary">Criar jogo e começar a marcar</button>
-            <button type="button" class="btn btn-ghost" onclick="voltarParaJogos()">Cancelar</button>
+            <button type="button" class="btn btn-ghost" onclick="voltarParaEvento()">Cancelar</button>
           </div>
         </form>
       </div>
@@ -1930,7 +2066,7 @@ function renderScout(){
   app.innerHTML = `
     ${renderTopbar()}
     <div class="main">
-      <button class="btn btn-ghost btn-sm" style="margin-bottom:14px" onclick="voltarParaJogos()">← Voltar</button>
+      <button class="btn btn-ghost btn-sm" style="margin-bottom:14px" onclick="voltarParaEvento()">← Voltar</button>
 
       <h1>${escapeHtml(atleta1.apelido || atleta1.nome)} / ${escapeHtml(atleta2.apelido || atleta2.nome)}</h1>
       <p class="muted" style="margin-bottom:16px">
