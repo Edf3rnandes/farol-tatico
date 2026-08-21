@@ -221,6 +221,7 @@ let state = {
   fichaId: null,        // null = criando; senão, id do atleta em edição
   fichaOriginal: null,
   fichaToken: undefined, // link do atleta: undefined = não buscou ainda, null = não tem, string = token
+  importAtletas: null,   // { linhas: [{dados, erros, avisos, incluir}], arquivoNome } — importação em massa
   authTab: 'entrar',
   authErro: '',
   authCarregando: false,
@@ -246,6 +247,11 @@ let state = {
   novoEvento: null,         // form de novo evento
   novoJogo: null,           // form de novo jogo
   jogoAtual: null,          // jogo aberto na tela de scout, com sets e rallies carregados
+
+  // estatísticas
+  estatisticasCarregadas: false,
+  estatisticas: { rallies: [], jogos: [] },
+  statsAtletaId: '',        // '' = comparação entre todos; senão, id do atleta selecionado
 };
 
 function escapeHtml(s){
@@ -383,6 +389,13 @@ async function irParaAba(aba){
     render();
     return;
   }
+  if (aba === 'estatisticas'){
+    state.view = 'estatisticas';
+    render();
+    if (!state.estatisticasCarregadas) await carregarEstatisticas();
+    render();
+    return;
+  }
   // treinos: mostra a lista de sessões por padrão
   state.view = 'sessoes';
   render();
@@ -480,13 +493,10 @@ async function abrirFicha(id){
   state.view = 'ficha';
   render();
 
-  const { data, error } = await sb
-    .from('tokens_atleta')
-    .select('token')
-    .eq('atleta_id', id)
-    .eq('revogado', false)
-    .limit(1)
-    .maybeSingle();
+  const [{ data, error }] = await Promise.all([
+    sb.from('tokens_atleta').select('token').eq('atleta_id', id).eq('revogado', false).limit(1).maybeSingle(),
+    state.estatisticasCarregadas ? Promise.resolve() : carregarEstatisticas(),
+  ]);
   if (error){ console.error(error); state.fichaToken = null; render(); return; }
   state.fichaToken = data?.token || null;
   render();
@@ -597,6 +607,225 @@ async function salvarFicha(ev){
   toast('Atleta salvo.', 'ok');
   await carregarAtletas();
   voltarParaLista();
+}
+
+/* ---------------------------- importação em massa ---------------------------- */
+
+function abrirImportarAtletas(){
+  state.view = 'atletas-importar';
+  state.importAtletas = null;
+  render();
+}
+
+function voltarDaImportacao(){
+  state.view = 'lista';
+  state.importAtletas = null;
+  render();
+}
+
+function baixarModeloImportacaoAtletas(){
+  const cabecalho = ['Nome completo*','Apelido','Sexo (M/F)*','Categoria','Data de nascimento (AAAA-MM-DD)',
+    'Altura (cm)','Envergadura (cm)','Alcance de ataque (cm)','Alcance de bloqueio (cm)',
+    'Mão dominante (destro/canhoto)','Lado preferencial (direita/esquerda/ambos)','Telefone','E-mail',
+    'Nome do responsável','Telefone do responsável','Status (ativo/inativo/afastado)','Observações'];
+  const exemplo = ['Maria Laura Souza','Malu','F','Sub-19','2008-03-15','172','178','210','205',
+    'destro','direita','(11) 99999-0000','malu@example.com','','','ativo',''];
+
+  const linhaCsv = (campos) => campos.map(c => {
+    const s = String(c ?? '');
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g,'""') + '"' : s;
+  }).join(',');
+
+  const csv = [linhaCsv(cabecalho), linhaCsv(exemplo)].join('\r\n');
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'modelo_atletas.csv';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// Aceita tanto vírgula quanto ponto-e-vírgula como separador — o Excel em
+// português costuma exportar CSV com ponto-e-vírgula.
+function detectarDelimitadorCsv(linhaCabecalho){
+  const virgulas = (linhaCabecalho.match(/,/g) || []).length;
+  const pontoVirgulas = (linhaCabecalho.match(/;/g) || []).length;
+  return pontoVirgulas > virgulas ? ';' : ',';
+}
+
+function parseCsv(texto){
+  const semBom = texto.replace(/^﻿/, '');
+  const linhasBrutas = semBom.split(/\r\n|\n|\r/).filter(l => l.trim() !== '');
+  if (linhasBrutas.length === 0) return [];
+  const delim = detectarDelimitadorCsv(linhasBrutas[0]);
+
+  function parseLinha(linha){
+    const campos = [];
+    let atual = '', dentroAspas = false;
+    for (let i = 0; i < linha.length; i++){
+      const c = linha[i];
+      if (dentroAspas){
+        if (c === '"'){
+          if (linha[i+1] === '"'){ atual += '"'; i++; }
+          else dentroAspas = false;
+        } else atual += c;
+      } else {
+        if (c === '"') dentroAspas = true;
+        else if (c === delim){ campos.push(atual); atual = ''; }
+        else atual += c;
+      }
+    }
+    campos.push(atual);
+    return campos.map(c => c.trim());
+  }
+
+  return linhasBrutas.map(parseLinha);
+}
+
+// Assume a mesma ordem de colunas do modelo baixado — mais simples e mais
+// robusto pra um usuário colando de uma planilha do que casar por nome de coluna.
+function validarLinhaImportacao(campos){
+  const [nome, apelido, sexoRaw, categoriaRaw, dataRaw, alturaRaw, envergaduraRaw, alcAtRaw, alcBlRaw,
+    maoRaw, ladoRaw, telefone, email, respNome, respTel, statusRaw, obs] = campos;
+  const erros = [];
+  const avisos = [];
+
+  if (!nome) erros.push('nome é obrigatório');
+
+  let sexo = null;
+  const sexoNorm = (sexoRaw || '').trim().toLowerCase();
+  if (sexoNorm.startsWith('m')) sexo = 'M';
+  else if (sexoNorm.startsWith('f')) sexo = 'F';
+  else erros.push('sexo inválido (use M ou F)');
+
+  let categoria_id = null;
+  if (categoriaRaw && sexo){
+    const cat = state.categorias.find(c => c.sexo === sexo && c.nome.toLowerCase() === categoriaRaw.trim().toLowerCase());
+    if (cat) categoria_id = cat.id;
+    else avisos.push(`categoria "${categoriaRaw}" não encontrada — deixei em branco`);
+  }
+
+  let data_nascimento = null;
+  if (dataRaw){
+    if (/^\d{4}-\d{2}-\d{2}$/.test(dataRaw)) data_nascimento = dataRaw;
+    else {
+      const m = dataRaw.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+      if (m) data_nascimento = `${m[3]}-${m[2]}-${m[1]}`;
+      else erros.push('data de nascimento inválida (use AAAA-MM-DD ou DD/MM/AAAA)');
+    }
+  }
+
+  function num(v, label){
+    if (!v) return null;
+    const n = Number(String(v).replace(',', '.'));
+    if (Number.isNaN(n)){ erros.push(label + ' inválido'); return null; }
+    return n;
+  }
+  const altura_cm = num(alturaRaw, 'altura');
+  const envergadura_cm = num(envergaduraRaw, 'envergadura');
+  const alcance_ataque_cm = num(alcAtRaw, 'alcance de ataque');
+  const alcance_bloqueio_cm = num(alcBlRaw, 'alcance de bloqueio');
+
+  let mao_dominante = null;
+  const maoNorm = (maoRaw || '').trim().toLowerCase();
+  if (maoNorm){
+    if (['destro','canhoto'].includes(maoNorm)) mao_dominante = maoNorm;
+    else avisos.push('mão dominante não reconhecida — deixei em branco');
+  }
+
+  let lado_preferencial = null;
+  const ladoNorm = (ladoRaw || '').trim().toLowerCase();
+  if (ladoNorm){
+    if (['direita','esquerda','ambos'].includes(ladoNorm)) lado_preferencial = ladoNorm;
+    else avisos.push('lado preferencial não reconhecido — deixei em branco');
+  }
+
+  let status = 'ativo';
+  const statusNorm = (statusRaw || '').trim().toLowerCase();
+  if (statusNorm){
+    if (['ativo','inativo','afastado'].includes(statusNorm)) status = statusNorm;
+    else avisos.push(`status "${statusRaw}" não reconhecido — usei "ativo"`);
+  }
+
+  return {
+    dados: {
+      nome: nome || '', apelido: apelido || null, sexo, categoria_id,
+      data_nascimento, altura_cm, envergadura_cm, alcance_ataque_cm, alcance_bloqueio_cm,
+      mao_dominante, lado_preferencial, telefone: telefone || null, email: email || null,
+      responsavel_nome: respNome || null, responsavel_telefone: respTel || null,
+      status, observacoes: obs || null,
+    },
+    erros, avisos,
+  };
+}
+
+// Só a coluna de sexo (M/F) é confiável o bastante pra distinguir cabeçalho
+// de dado real — um título de coluna nunca começa com "m" ou "f" sozinho.
+function pareceLinhaDeCabecalho(campos){
+  const sexo = (campos[2] || '').trim().toLowerCase();
+  return !(sexo.startsWith('m') || sexo.startsWith('f'));
+}
+
+function processarTextoImportacao(texto, nomeArquivo){
+  let linhas = parseCsv(texto).filter(campos => campos.some(c => c && c.trim() !== ''));
+  if (linhas.length && pareceLinhaDeCabecalho(linhas[0])) linhas = linhas.slice(1);
+
+  const processadas = linhas.map(campos => {
+    const { dados, erros, avisos } = validarLinhaImportacao(campos);
+    return { dados, erros, avisos, incluir: erros.length === 0 };
+  });
+  if (processadas.length === 0){
+    toast('Não encontrei nenhuma linha de atleta nesse arquivo.', 'err');
+    return;
+  }
+  state.importAtletas = { linhas: processadas, arquivoNome: nomeArquivo };
+  render();
+}
+
+function handleArquivoImportacao(input){
+  const arquivo = input.files?.[0];
+  if (!arquivo) return;
+  const reader = new FileReader();
+  reader.onload = (e) => processarTextoImportacao(e.target.result, arquivo.name);
+  reader.readAsText(arquivo, 'UTF-8');
+}
+
+function processarTextoColadoImportacao(){
+  const texto = document.getElementById('import-textarea')?.value || '';
+  if (!texto.trim()){ toast('Cole os dados da planilha primeiro.', 'err'); return; }
+  processarTextoImportacao(texto, null);
+}
+
+function toggleIncluirLinhaImportacao(i){
+  const l = state.importAtletas.linhas[i];
+  if (l.erros.length > 0) return;
+  l.incluir = !l.incluir;
+  render();
+}
+
+function limparImportacao(){
+  state.importAtletas = null;
+  render();
+}
+
+async function confirmarImportacaoAtletas(){
+  const linhas = state.importAtletas.linhas.filter(l => l.incluir && l.erros.length === 0);
+  if (linhas.length === 0){ toast('Nenhum atleta marcado pra importar.', 'err'); return; }
+
+  const btn = document.getElementById('btn-confirmar-importacao');
+  if (btn){ btn.disabled = true; btn.textContent = 'Importando…'; }
+
+  const resp = await sb.from('atletas').insert(linhas.map(l => l.dados)).select();
+
+  if (resp.error){
+    toast('Não foi possível importar: ' + resp.error.message, 'err');
+    if (btn){ btn.disabled = false; btn.textContent = `Importar ${linhas.length} atleta${linhas.length===1?'':'s'}`; }
+    return;
+  }
+
+  toast(`${linhas.length} atleta${linhas.length===1?'':'s'} importado${linhas.length===1?'':'s'}.`, 'ok');
+  await carregarAtletas();
+  voltarDaImportacao();
 }
 
 /* ---------------------------- turmas ---------------------------- */
@@ -1252,6 +1481,108 @@ async function definirSubtipoRally(rallyId, subtipoId){
   render();
 }
 
+/* ---------------------------- estatísticas ---------------------------- */
+
+// Todos os pontos com atleta marcado (nossos fundamentos + nossos erros) e
+// todos os jogos (com a dupla embutida, pra saber quem jogou). É pouco
+// volume de dados pra comissão técnica de uma equipe, então dá pra trazer
+// tudo de uma vez e agregar aqui na tela — sem precisar de view nova no banco.
+async function carregarEstatisticas(){
+  const [{ data: rallies, error: e1 }, { data: jogos, error: e2 }] = await Promise.all([
+    sb.from('rallies')
+      .select('*, subtipos_acao(codigo, nome), sets(numero, jogo_id)')
+      .not('atleta_id', 'is', null),
+    sb.from('jogos')
+      .select('*, duplas(atleta_1_id, atleta_2_id), competicoes(nome)')
+      .order('criado_em', { ascending: true }),
+  ]);
+  if (e1 || e2){ toast('Erro ao carregar estatísticas: ' + (e1 || e2).message, 'err'); return; }
+  state.estatisticas = { rallies: rallies || [], jogos: jogos || [] };
+  state.estatisticasCarregadas = true;
+}
+
+const FUNDAMENTOS = ['ataque', 'saque', 'bloqueio'];
+
+function jogoPorId(jogoId){
+  return state.estatisticas.jogos.find(j => j.id === jogoId);
+}
+
+function ralliesDoAtleta(atletaId){
+  return state.estatisticas.rallies.filter(r => r.atleta_id === atletaId);
+}
+
+// Ganhos = pontos que o atleta fechou (ataque/saque/bloqueio). Erros = pontos
+// perdidos por erro dele, já classificados por tipo (erro_nosso.subtipo).
+function statsFundamento(atletaId){
+  const out = {};
+  FUNDAMENTOS.forEach(f => { out[f] = { ganhos: 0, erros: 0 }; });
+  ralliesDoAtleta(atletaId).forEach(r => {
+    if (FUNDAMENTOS.includes(r.origem)) out[r.origem].ganhos++;
+    else if (r.origem === 'erro_nosso' && r.subtipos_acao && FUNDAMENTOS.includes(r.subtipos_acao.codigo)){
+      out[r.subtipos_acao.codigo].erros++;
+    }
+  });
+  return out;
+}
+
+function aproveitamento(ganhos, erros){
+  const total = ganhos + erros;
+  return total === 0 ? null : Math.round((ganhos / total) * 100);
+}
+
+function errosMaisComuns(atletaId){
+  const contagem = {};
+  ralliesDoAtleta(atletaId).filter(r => r.origem === 'erro_nosso').forEach(r => {
+    const nome = r.subtipos_acao?.nome || 'Outro';
+    contagem[nome] = (contagem[nome] || 0) + 1;
+  });
+  return Object.entries(contagem).sort((a, b) => b[1] - a[1]);
+}
+
+function evolucaoTemporal(atletaId){
+  const porJogo = {};
+  ralliesDoAtleta(atletaId).forEach(r => {
+    const jogoId = r.sets?.jogo_id;
+    if (!jogoId) return;
+    if (!porJogo[jogoId]) porJogo[jogoId] = { ganhos: 0, erros: 0 };
+    if (FUNDAMENTOS.includes(r.origem)) porJogo[jogoId].ganhos++;
+    else if (r.origem === 'erro_nosso') porJogo[jogoId].erros++;
+  });
+  return Object.entries(porJogo)
+    .map(([jogoId, v]) => ({ jogo: jogoPorId(jogoId), ...v, aproveitamento: aproveitamento(v.ganhos, v.erros) }))
+    .filter(x => x.jogo)
+    .sort((a, b) => new Date(a.jogo.criado_em) - new Date(b.jogo.criado_em));
+}
+
+function jogosDoAtleta(atletaId){
+  return state.estatisticas.jogos
+    .filter(j => j.duplas && (j.duplas.atleta_1_id === atletaId || j.duplas.atleta_2_id === atletaId))
+    .sort((a, b) => new Date(b.criado_em) - new Date(a.criado_em));
+}
+
+function comparacaoAtletas(){
+  return state.atletas.map(a => {
+    const st = statsFundamento(a.id);
+    const ganhos = FUNDAMENTOS.reduce((s, f) => s + st[f].ganhos, 0);
+    const erros = FUNDAMENTOS.reduce((s, f) => s + st[f].erros, 0);
+    return { atleta: a, ganhos, erros, aproveitamento: aproveitamento(ganhos, erros) };
+  })
+  .filter(x => x.aproveitamento !== null)
+  .sort((a, b) => b.aproveitamento - a.aproveitamento);
+}
+
+function selecionarAtletaEstatisticas(id){
+  state.statsAtletaId = id;
+  render();
+}
+
+function verEstatisticasDoAtleta(atletaId){
+  state.statsAtletaId = atletaId;
+  state.aba = 'estatisticas';
+  state.view = 'estatisticas';
+  render();
+}
+
 /* ---------------------------- lista: filtro ---------------------------- */
 
 function atualizarFiltro(campo, valor){
@@ -1278,6 +1609,7 @@ function render(){
   if (state.view === 'bootstrap')     return renderBootstrap();
   if (state.view === 'lista')         return renderLista();
   if (state.view === 'ficha')         return renderFicha();
+  if (state.view === 'atletas-importar') return renderImportarAtletas();
   if (state.view === 'turmas')        return renderTurmas();
   if (state.view === 'turma-edit')    return renderTurmaEdit();
   if (state.view === 'sessoes')       return renderSessoes();
@@ -1288,6 +1620,7 @@ function render(){
   if (state.view === 'evento-detalhe')  return renderEventoDetalhe();
   if (state.view === 'jogo-novo')       return renderNovoJogo();
   if (state.view === 'jogo-scout')      return renderScout();
+  if (state.view === 'estatisticas')    return renderEstatisticas();
 }
 
 function logoSvg(){
@@ -1309,6 +1642,7 @@ function renderTopbar(){
         <nav class="topnav">
           <button class="${state.aba==='atletas'?'on':''}" onclick="irParaAba('atletas')">Atletas</button>
           <button class="${state.aba==='jogos'?'on':''}" onclick="irParaAba('jogos')">Jogos</button>
+          <button class="${state.aba==='estatisticas'?'on':''}" onclick="irParaAba('estatisticas')">Estatísticas</button>
           <button class="${state.aba==='treinos'?'on':''}" onclick="irParaAba('treinos')">Treinos</button>
         </nav>
       ` : ''}
@@ -1399,6 +1733,7 @@ function renderLista(){
     <div class="main">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
         <h1 style="flex:1">Atletas</h1>
+        <button class="btn btn-ghost" onclick="abrirImportarAtletas()">Importar planilha</button>
         <button class="btn btn-primary" onclick="abrirNovaFicha()">+ Novo atleta</button>
       </div>
       <p class="muted">${state.atletas.length} cadastrado${state.atletas.length===1?'':'s'}</p>
@@ -1565,6 +1900,12 @@ function renderFicha(){
 
           ${editando ? `
           <div class="section">
+            <div class="section-title">Desempenho no scout</div>
+            ${!state.estatisticasCarregadas ? `<p class="muted">Carregando…</p>` : renderResumoDesempenho(state.fichaId)}
+          </div>` : ''}
+
+          ${editando ? `
+          <div class="section">
             <div class="section-title">Link do atleta</div>
             <p class="muted" style="margin-top:-4px">Mande esse endereço uma vez pelo WhatsApp. É fixo — não muda, o atleta
               abre todo dia pra responder antes e depois do treino, sem precisar de login.</p>
@@ -1583,6 +1924,89 @@ function renderFicha(){
           </div>
         </form>
       </div>
+    </div>`;
+}
+
+function renderImportarAtletas(){
+  const imp = state.importAtletas;
+
+  app.innerHTML = `
+    ${renderTopbar()}
+    <div class="main">
+      <button class="btn btn-ghost btn-sm" style="margin-bottom:14px" onclick="voltarDaImportacao()">← Voltar</button>
+      <h1>Importar atletas</h1>
+      <p class="muted" style="margin-bottom:20px">Cadastre vários atletas de uma vez a partir de uma planilha.</p>
+
+      <div class="card" style="margin-bottom:16px">
+        <div class="section-title">1. Baixe o modelo</div>
+        <p class="muted" style="margin-top:-4px">Um arquivo CSV com as colunas certas e uma linha de exemplo. Abre no Excel,
+          Google Sheets ou qualquer planilha. Preencha uma linha por atleta, sem mudar a ordem das colunas, e salve
+          mantendo o formato CSV.</p>
+        <button type="button" class="btn" onclick="baixarModeloImportacaoAtletas()">Baixar modelo (.csv)</button>
+      </div>
+
+      <div class="card">
+        <div class="section-title">2. Envie a planilha preenchida</div>
+        <div class="field">
+          <label>Arquivo CSV</label>
+          <input type="file" accept=".csv,text/csv" onchange="handleArquivoImportacao(this)">
+        </div>
+        <p class="muted" style="margin:10px 0 6px">Ou, se preferir, cole aqui o conteúdo copiado da planilha:</p>
+        <div class="field">
+          <textarea id="import-textarea" placeholder="Cole aqui (Ctrl+V) o conteúdo copiado do Excel/Google Sheets…" style="min-height:100px"></textarea>
+        </div>
+        <button type="button" class="btn" onclick="processarTextoColadoImportacao()">Processar texto colado</button>
+      </div>
+
+      ${imp ? renderPreviaImportacao(imp) : ''}
+    </div>`;
+}
+
+function renderPreviaImportacao(imp){
+  const validas = imp.linhas.filter(l => l.erros.length === 0 && l.incluir);
+  const comErro = imp.linhas.filter(l => l.erros.length > 0);
+  const comAviso = imp.linhas.filter(l => l.erros.length === 0 && l.avisos.length > 0);
+
+  return `
+    <div class="section-title" style="margin-top:24px">3. Confira e importe</div>
+    <p class="muted" style="margin-top:-4px">
+      ${imp.linhas.length} linha${imp.linhas.length===1?'':'s'} encontrada${imp.linhas.length===1?'':'s'} ·
+      ${validas.length} pronta${validas.length===1?'':'s'} pra importar
+      ${comErro.length ? ` · ${comErro.length} com erro (não ${comErro.length===1?'vai':'vão'} ser importada${comErro.length===1?'':'s'})` : ''}
+      ${comAviso.length ? ` · ${comAviso.length} com aviso` : ''}
+    </p>
+
+    <div style="overflow-x:auto">
+      <table>
+        <thead><tr><th></th><th>Nome</th><th>Sexo</th><th>Categoria</th><th>Status</th><th>Observações da importação</th></tr></thead>
+        <tbody>
+          ${imp.linhas.map((l, i) => {
+            const cat = state.categorias.find(c => c.id === l.dados.categoria_id);
+            const temErro = l.erros.length > 0;
+            return `
+              <tr class="row" style="cursor:default;${temErro ? 'opacity:.6' : ''}">
+                <td><input type="checkbox" class="checkbox-big" ${l.incluir?'checked':''} ${temErro?'disabled':''}
+                       onchange="toggleIncluirLinhaImportacao(${i})"></td>
+                <td class="nome-cel">${escapeHtml(l.dados.nome || '(sem nome)')}</td>
+                <td>${escapeHtml(l.dados.sexo || '—')}</td>
+                <td>${cat ? escapeHtml(cat.nome) : '—'}</td>
+                <td>${escapeHtml(l.dados.status)}</td>
+                <td>
+                  ${l.erros.map(e => `<div style="color:var(--d);font-size:.78rem">${escapeHtml(e)}</div>`).join('')}
+                  ${l.avisos.map(a => `<div style="color:var(--b);font-size:.78rem">${escapeHtml(a)}</div>`).join('')}
+                  ${!temErro && l.avisos.length===0 ? `<span class="muted" style="font-size:.78rem">tudo certo</span>` : ''}
+                </td>
+              </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="ficha-actions">
+      <button type="button" id="btn-confirmar-importacao" class="btn btn-primary" onclick="confirmarImportacaoAtletas()" ${validas.length===0?'disabled':''}>
+        Importar ${validas.length} atleta${validas.length===1?'':'s'}
+      </button>
+      <button type="button" class="btn btn-ghost" onclick="limparImportacao()">Escolher outro arquivo</button>
     </div>`;
 }
 
@@ -2021,6 +2445,157 @@ function renderNovoJogo(){
         </form>
       </div>
     </div>`;
+}
+
+/* ---------------------------- render: estatísticas ---------------------------- */
+
+function renderEstatisticas(){
+  if (!state.estatisticasCarregadas){
+    app.innerHTML = `${renderTopbar()}<div class="center-screen"><div class="spinner"></div></div>`;
+    return;
+  }
+
+  const atletaId = state.statsAtletaId;
+  const atletasOrdenados = [...state.atletas].sort((a,b) => (a.nome||'').localeCompare(b.nome||''));
+
+  app.innerHTML = `
+    ${renderTopbar()}
+    <div class="main">
+      <h1>Estatísticas</h1>
+      <p class="muted" style="margin-bottom:18px">Calculado a partir dos pontos marcados no scout ao vivo.</p>
+
+      <div class="field" style="max-width:320px">
+        <label>Atleta</label>
+        <select onchange="selecionarAtletaEstatisticas(this.value)">
+          <option value="">Comparação entre todos</option>
+          ${atletasOrdenados.map(a => `<option value="${a.id}" ${atletaId===a.id?'selected':''}>${escapeHtml(a.nome)}</option>`).join('')}
+        </select>
+      </div>
+
+      ${atletaId ? renderStatsAtleta(atletaId) : renderStatsComparacao()}
+    </div>`;
+}
+
+function barraAproveitamento(pct){
+  if (pct === null) return '<span class="muted">—</span>';
+  const cor = pct >= 60 ? 'var(--c)' : pct >= 40 ? 'var(--b)' : 'var(--d)';
+  return `
+    <div style="display:flex;align-items:center;gap:8px">
+      <div style="flex:1;max-width:120px;height:8px;border-radius:4px;background:var(--card2);overflow:hidden">
+        <div style="width:${pct}%;height:100%;background:${cor}"></div>
+      </div>
+      <span style="font-weight:700;font-size:.82rem">${pct}%</span>
+    </div>`;
+}
+
+function renderStatsComparacao(){
+  const ranking = comparacaoAtletas();
+  if (ranking.length === 0){
+    return `<div class="empty" style="margin-top:20px">Ainda não há pontos suficientes marcados no scout pra gerar uma comparação.</div>`;
+  }
+  return `
+    <div class="section-title" style="margin-top:22px">Aproveitamento geral (ataque + saque + bloqueio vs. erro nosso)</div>
+    <table>
+      <thead><tr><th>Atleta</th><th>Aproveitamento</th><th>Ganhos</th><th>Erros</th></tr></thead>
+      <tbody>
+        ${ranking.map(r => `
+          <tr class="row" onclick="selecionarAtletaEstatisticas('${r.atleta.id}')">
+            <td class="nome-cel">${escapeHtml(r.atleta.apelido || r.atleta.nome)}</td>
+            <td>${barraAproveitamento(r.aproveitamento)}</td>
+            <td>${r.ganhos}</td>
+            <td>${r.erros}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>`;
+}
+
+function renderStatsAtleta(atletaId){
+  const atleta = state.atletas.find(a => a.id === atletaId);
+  const st = statsFundamento(atletaId);
+  const erros = errosMaisComuns(atletaId);
+  const evolucao = evolucaoTemporal(atletaId);
+  const jogos = jogosDoAtleta(atletaId);
+
+  return `
+    <h2 style="margin-top:22px">${escapeHtml(atleta?.apelido || atleta?.nome || 'Atleta')}</h2>
+
+    <div class="section-title" style="margin-top:18px">Eficiência por fundamento</div>
+    <div class="row3">
+      ${FUNDAMENTOS.map(f => {
+        const pct = aproveitamento(st[f].ganhos, st[f].erros);
+        return `
+          <div class="card">
+            <div class="section-title" style="margin-bottom:8px">${f[0].toUpperCase()+f.slice(1)}</div>
+            <div style="font-size:1.6rem;font-weight:800">${pct===null?'—':pct+'%'}</div>
+            <div class="muted" style="margin:4px 0 0">${st[f].ganhos} ponto${st[f].ganhos===1?'':'s'} · ${st[f].erros} erro${st[f].erros===1?'':'s'}</div>
+          </div>`;
+      }).join('')}
+    </div>
+
+    <div class="section-title" style="margin-top:24px">Evolução ao longo dos jogos</div>
+    ${evolucao.length === 0 ? `<div class="empty">Ainda sem jogos com pontos marcados no scout pra este atleta.</div>` : `
+      <div class="card" style="display:flex;align-items:flex-end;gap:6px;height:90px;overflow-x:auto;padding:16px">
+        ${evolucao.map(e => {
+          const pct = e.aproveitamento ?? 0;
+          const cor = pct >= 60 ? 'var(--c)' : pct >= 40 ? 'var(--b)' : 'var(--d)';
+          const data = e.jogo.criado_em ? new Date(e.jogo.criado_em).toLocaleDateString('pt-BR') : '';
+          const tooltip = `${e.jogo.competicoes?.nome || 'Jogo'} · ${data} · ${e.aproveitamento===null?'sem dados':e.aproveitamento+'%'}`;
+          return `<div title="${escapeHtml(tooltip)}" style="width:14px;height:${Math.max(6, pct)}px;border-radius:3px;background:${cor};flex:none"></div>`;
+        }).join('')}
+      </div>
+      <p class="muted" style="margin-top:6px">Cada barra é um jogo, do mais antigo (esquerda) ao mais recente (direita). Passe o mouse pra ver os detalhes.</p>
+    `}
+
+    <div class="section-title" style="margin-top:24px">Erros mais comuns</div>
+    ${erros.length === 0 ? `<div class="empty">Nenhum erro registrado ainda pra este atleta.</div>` : `
+      <div class="card" style="padding:6px 16px">
+        ${erros.map(([nome, qtd]) => `
+          <div class="presenca-row"><span class="nome">${escapeHtml(nome)}</span><span class="pill">${qtd}</span></div>
+        `).join('')}
+      </div>`}
+
+    <div class="section-title" style="margin-top:24px">Jogos (${jogos.length})</div>
+    ${jogos.length === 0 ? `<div class="empty">Nenhum jogo registrado ainda.</div>` : jogos.map(j => {
+      const finalizado = j.sets_pro === 2 || j.sets_contra === 2;
+      const venceu = j.sets_pro > j.sets_contra;
+      return `
+        <div class="list-item" style="cursor:default">
+          <div class="top">
+            <div class="titulo">${escapeHtml(j.competicoes?.nome || 'Evento')} · ${labelFase(j.fase)}</div>
+            <span class="pill" style="${finalizado ? (venceu ? 'background:color-mix(in srgb,var(--c) 18%,transparent);color:var(--c)' : 'background:color-mix(in srgb,var(--d) 18%,transparent);color:var(--d)') : ''}">
+              ${j.sets_pro} × ${j.sets_contra}${finalizado ? (venceu ? ' · V' : ' · D') : ''}
+            </span>
+          </div>
+          <div class="meta">${j.criado_em ? new Date(j.criado_em).toLocaleDateString('pt-BR') : ''}</div>
+        </div>`;
+    }).join('')}
+  `;
+}
+
+// Resumo compacto embutido na ficha do atleta — reaproveita as mesmas
+// funções de agregação da tela de Estatísticas completa.
+function renderResumoDesempenho(atletaId){
+  const st = statsFundamento(atletaId);
+  const jogos = jogosDoAtleta(atletaId);
+  const vitorias = jogos.filter(j => (j.sets_pro===2||j.sets_contra===2) && j.sets_pro > j.sets_contra).length;
+  const derrotas = jogos.filter(j => (j.sets_pro===2||j.sets_contra===2) && j.sets_contra > j.sets_pro).length;
+  const semPontos = FUNDAMENTOS.every(f => st[f].ganhos + st[f].erros === 0);
+
+  if (semPontos && jogos.length === 0){
+    return `<p class="muted" style="margin-top:-4px">Nenhum ponto marcado no scout ainda pra este atleta.</p>`;
+  }
+
+  return `
+    <div class="row3" style="margin-bottom:10px">
+      ${FUNDAMENTOS.map(f => {
+        const pct = aproveitamento(st[f].ganhos, st[f].erros);
+        return `<div><div class="muted" style="margin-bottom:2px">${f[0].toUpperCase()+f.slice(1)}</div><div style="font-weight:700">${pct===null?'—':pct+'%'}</div></div>`;
+      }).join('')}
+    </div>
+    <p class="muted" style="margin:0 0 10px">${jogos.length} jogo${jogos.length===1?'':'s'} · ${vitorias}V ${derrotas}D</p>
+    <button type="button" class="btn btn-sm" onclick="verEstatisticasDoAtleta('${atletaId}')">Ver estatísticas completas</button>
+  `;
 }
 
 function renderTimelineRallies(ja){
