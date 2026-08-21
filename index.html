@@ -211,17 +211,18 @@ const app = document.getElementById('app');
 
 /* ---------------------------- estado ---------------------------- */
 let state = {
-  view: 'loading',      // loading | auth | bootstrap | lista | ficha | turmas | turma-edit | sessoes | sessao-detail
-  aba: 'atletas',        // atletas | treinos — controla os botões de navegação do topo
+  view: 'loading',      // loading | auth | bootstrap | dashboard | lista | ficha | turmas | turma-edit | sessoes | sessao-detail
+  aba: 'inicio',         // inicio | atletas | treinos — controla os botões de navegação do topo
   user: null,           // usuário autenticado (auth.users)
   usuario: null,        // linha em ft.usuarios (papel, etc.)
   categorias: [],
   atletas: [],
-  filtro: { busca: '', categoria: '', status: 'ativo' },
+  filtro: { busca: '', categoria: '', status: 'ativo', turma: '' },
   fichaId: null,        // null = criando; senão, id do atleta em edição
   fichaOriginal: null,
   fichaToken: undefined, // link do atleta: undefined = não buscou ainda, null = não tem, string = token
   importAtletas: null,   // { linhas: [{dados, erros, avisos, incluir}], arquivoNome } — importação em massa
+  revisaoSelecionados: null, // Set de ids de atleta marcados pra aplicar a categoria sugerida por idade
   authTab: 'entrar',
   authErro: '',
   authCarregando: false,
@@ -232,11 +233,22 @@ let state = {
   turmaEdit: null,          // objeto em edição (novo ou existente)
   turmaMembrosIds: new Set(),
   buscaMembroTurma: '',
+  turmaAtletasCarregado: false,
+  turmaAtletasMap: {},      // atleta_id -> [turma_id, ...] (só matrículas ativas, ate is null) — usado pro filtro de turma em Atletas
 
   sessoesCarregadas: false,
   sessoes: [],
   sessaoEdit: null,         // form de nova sessão
   sessaoAtual: null,        // sessão aberta (detalhe), com presenças carregadas
+
+  // testes físicos
+  testesCarregados: false,
+  testes: [],                // catálogo ft.testes (CMJ, sprint, Yo-Yo etc.), já vem seedado no banco
+  resultadosTestesCarregados: false,
+  resultadosTestes: [],      // resultados recentes pra tela de lista/filtro
+  filtroTestes: { atletaId: '', testeId: '' },
+  testeBateriaForm: null,    // { teste_id, data, bateria, avaliador, condicoes, busca, valores: {atletaId: string} }
+  fichaResultadosTestes: undefined, // resultados do atleta da ficha aberta: undefined = carregando, [] = nenhum
 
   // jogos / scout
   competicoesCarregadas: false,
@@ -252,6 +264,10 @@ let state = {
   estatisticasCarregadas: false,
   estatisticas: { rallies: [], jogos: [] },
   statsAtletaId: '',        // '' = comparação entre todos; senão, id do atleta selecionado
+
+  // sincronização do scout offline
+  filaSync: [],             // operações pendentes de gravar no Supabase, carregado do localStorage
+  sincronizando: false,
 };
 
 function escapeHtml(s){
@@ -279,6 +295,86 @@ function calcIdade(dataNasc){
   return idade;
 }
 
+// Idade "de categoria", pelo critério da federação: quantos anos o atleta
+// completa NESTE ano civil, não a idade exata de hoje. Um atleta que nasceu
+// em dezembro de 2012 já conta como "13 em 2026" desde 1º de janeiro.
+function idadeCategoria(dataNasc){
+  if (!dataNasc) return null;
+  const anoNascimento = Number(String(dataNasc).slice(0, 4));
+  if (!anoNascimento) return null;
+  return new Date().getFullYear() - anoNascimento;
+}
+
+// Acha, entre as categorias já cadastradas (com idade_min/idade_max), a que
+// bate com o sexo e a idade de categoria do atleta neste ano.
+function categoriaSugerida(atleta){
+  if (!atleta || !atleta.sexo || !atleta.data_nascimento) return null;
+  const idade = idadeCategoria(atleta.data_nascimento);
+  if (idade === null) return null;
+  return state.categorias.find(c => c.sexo === atleta.sexo &&
+    (c.idade_min == null || idade >= c.idade_min) &&
+    (c.idade_max == null || idade <= c.idade_max)) || null;
+}
+
+// Todo mundo com sexo + nascimento cadastrados cuja categoria sugerida pela
+// idade não bate com a categoria atual — a lista que alimenta a revisão em massa.
+function categoriasParaRevisar(){
+  return state.atletas
+    .map(a => ({ atleta: a, sugestao: categoriaSugerida(a) }))
+    .filter(x => x.sugestao && x.sugestao.id !== x.atleta.categoria_id);
+}
+
+/* ---------------------------- dashboard (Início) ---------------------------- */
+
+// Próximo aniversário de cada atleta (ano que vem, se já passou este ano),
+// ordenado por quem faz aniversário primeiro. dias = janela de quantos dias
+// pra frente considerar "próximo".
+function aniversariantesProximos(dias = 30){
+  const hoje = new Date();
+  const hojeSemHora = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate());
+
+  return state.atletas
+    .filter(a => a.data_nascimento)
+    .map(a => {
+      const nasc = new Date(a.data_nascimento + 'T00:00:00');
+      let proxima = new Date(hojeSemHora.getFullYear(), nasc.getMonth(), nasc.getDate());
+      if (proxima < hojeSemHora) proxima = new Date(hojeSemHora.getFullYear() + 1, nasc.getMonth(), nasc.getDate());
+      const diffDias = Math.round((proxima - hojeSemHora) / 86400000);
+      const idadeQueFaz = proxima.getFullYear() - nasc.getFullYear();
+      return { atleta: a, proxima, diffDias, idadeQueFaz };
+    })
+    .filter(x => x.diffDias >= 0 && x.diffDias <= dias)
+    .sort((a, b) => a.diffDias - b.diffDias);
+}
+
+function descricaoDiasRestantes(diffDias){
+  if (diffDias === 0) return 'hoje';
+  if (diffDias === 1) return 'amanhã';
+  return `em ${diffDias} dias`;
+}
+
+function proximosEventos(limite = 5){
+  const hoje = new Date().toISOString().slice(0, 10);
+  return state.competicoes
+    .filter(c => (c.data_fim || c.data_inicio) >= hoje)
+    .sort((a, b) => a.data_inicio.localeCompare(b.data_inicio))
+    .slice(0, limite);
+}
+
+function proximasSessoes(limite = 5){
+  const hoje = new Date().toISOString().slice(0, 10);
+  return state.sessoes
+    .filter(s => s.data >= hoje)
+    .sort((a, b) => a.data.localeCompare(b.data) || (a.hora_inicio || '').localeCompare(b.hora_inicio || ''))
+    .slice(0, limite);
+}
+
+// Atalhos rápidos a partir do dashboard: além de abrir a tela, ajustam a aba
+// ativa pra navegação/voltar continuarem consistentes.
+function novoAtletaDoDashboard(){ state.aba = 'atletas'; abrirNovaFicha(); }
+function novaSessaoDoDashboard(){ state.aba = 'treinos'; abrirNovaSessao(); }
+function novoEventoDoDashboard(){ state.aba = 'jogos'; abrirNovoEvento(); }
+
 function iniciais(nome){
   if (!nome) return '?';
   const partes = nome.trim().split(/\s+/);
@@ -287,9 +383,109 @@ function iniciais(nome){
   return (a + b).toUpperCase();
 }
 
+/* ---------------------------- scout offline ----------------------------
+   O scout ao vivo (marcar pontos jogo a jogo) precisa continuar funcionando
+   em quadra de praia com sinal ruim ou nenhum. A estratégia: toda gravação
+   feita na tela de scout (ponto marcado, desfazer, fim de set/jogo) atualiza
+   o estado local NA HORA e só DEPOIS tenta gravar no Supabase — se não
+   conseguir, a operação fica numa fila salva no aparelho e o jogo continua
+   normalmente. A fila tenta sincronizar sozinha quando a conexão volta, e
+   também dá pra forçar com o botão "Sincronizar agora".
+   Isso vale só a partir do momento em que a tela de scout já foi aberta com
+   sinal pelo menos uma vez — criar um jogo novo ainda precisa de conexão.
+--------------------------------------------------------------------------- */
+
+function novoUuid(){
+  if (window.crypto?.randomUUID) return crypto.randomUUID();
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+}
+
+function carregarFilaSyncDoStorage(){
+  try { return JSON.parse(localStorage.getItem('ft_fila_sync') || '[]'); }
+  catch { return []; }
+}
+
+function salvarFilaSyncNoStorage(fila){
+  try { localStorage.setItem('ft_fila_sync', JSON.stringify(fila)); } catch {}
+}
+
+function enfileirarOperacao(tabela, tipo, alvoId, dados){
+  state.filaSync.push({ id: novoUuid(), tabela, tipo, alvoId, dados, criadoEm: new Date().toISOString() });
+  salvarFilaSyncNoStorage(state.filaSync);
+}
+
+async function executarOperacaoSync(op){
+  try {
+    let resp;
+    if (op.tipo === 'insert') resp = await sb.from(op.tabela).insert(op.dados);
+    else if (op.tipo === 'update') resp = await sb.from(op.tabela).update(op.dados).eq('id', op.alvoId);
+    else if (op.tipo === 'delete') resp = await sb.from(op.tabela).delete().eq('id', op.alvoId);
+    if (resp?.error){
+      // O supabase-js NÃO lança exceção quando o fetch falha por falta de rede —
+      // ele devolve isso como se fosse um erro comum, só que sem "code" (o code
+      // só vem preenchido quando o pedido realmente chegou no Postgres/PostgREST).
+      // Sem essa distinção, uma queda de sinal seria tratada como erro definitivo
+      // e o ponto seria descartado da fila em vez de tentado de novo depois.
+      const semRespostaDoServidor = !resp.error.code;
+      return semRespostaDoServidor
+        ? { status: 'falha-rede', mensagem: resp.error.message }
+        : { status: 'erro-servidor', mensagem: resp.error.message };
+    }
+    return { status: 'ok' };
+  } catch (e) {
+    return { status: 'falha-rede', mensagem: e?.message || 'sem conexão' };
+  }
+}
+
+// Processa a fila em ordem (importante: um ponto pode ter sido desfeito antes
+// mesmo de terminar de sincronizar — a ordem garante que o resultado final
+// bate). Falha de rede para tudo e tenta de novo depois; erro real do
+// servidor descarta só aquela operação (não pode travar a fila pra sempre).
+async function processarFilaSync(){
+  if (state.sincronizando || !state.filaSync.length) return;
+  state.sincronizando = true;
+  if (state.view === 'jogo-scout') render();
+
+  while (state.filaSync.length){
+    const resultado = await executarOperacaoSync(state.filaSync[0]);
+    if (resultado.status === 'falha-rede') break;
+    if (resultado.status === 'erro-servidor'){
+      console.error('Sync: operação rejeitada, descartada da fila —', state.filaSync[0], resultado.mensagem);
+      toast('Um dado do scout não pôde ser sincronizado — confira esse jogo com calma depois.', 'err');
+    }
+    state.filaSync.shift();
+    salvarFilaSyncNoStorage(state.filaSync);
+  }
+
+  state.sincronizando = false;
+  if (state.view === 'jogo-scout') render();
+}
+
+function persistirJogoAtualOffline(){
+  try {
+    const ja = state.jogoAtual;
+    if (!ja || ja.carregando) return;
+    localStorage.setItem('ft_scout_offline', JSON.stringify({ jogoId: ja.jogo.id, jogoAtual: ja }));
+  } catch {}
+}
+
+function carregarJogoAtualOffline(jogoId){
+  try {
+    const raw = localStorage.getItem('ft_scout_offline');
+    if (!raw) return null;
+    const obj = JSON.parse(raw);
+    return obj.jogoId === jogoId ? obj.jogoAtual : null;
+  } catch { return null; }
+}
+
 /* ---------------------------- boot ---------------------------- */
 
 async function init(){
+  state.filaSync = carregarFilaSyncDoStorage();
+
   const { data: { session } } = await sb.auth.getSession();
   state.user = session?.user || null;
 
@@ -299,6 +495,16 @@ async function init(){
   });
 
   await boot();
+
+  if (state.filaSync.length) processarFilaSync();
+  window.addEventListener('online', () => processarFilaSync());
+  setInterval(() => { if (state.filaSync.length) processarFilaSync(); }, 20000);
+
+  if ('serviceWorker' in navigator){
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('sw.js').catch(() => {});
+    });
+  }
 }
 
 async function boot(){
@@ -327,9 +533,12 @@ async function boot(){
     return;
   }
 
-  await Promise.all([carregarCategorias(), carregarAtletas()]);
-  state.aba = 'atletas';
-  state.view = 'lista';
+  await Promise.all([
+    carregarCategorias(), carregarAtletas(), carregarTurmas(), carregarTurmaAtletasMap(),
+    carregarCompeticoes(), carregarSessoes(),
+  ]);
+  state.aba = 'inicio';
+  state.view = 'dashboard';
   render();
 }
 
@@ -361,6 +570,20 @@ async function carregarTurmas(){
   state.turmasCarregadas = true;
 }
 
+// Mapa atleta_id -> [turma_id, ...] das matrículas ativas (ate is null), pra
+// filtrar/mostrar grupo de treino na tela de Atletas sem uma query por atleta.
+async function carregarTurmaAtletasMap(){
+  const { data, error } = await sb.from('turma_atletas').select('turma_id, atleta_id').is('ate', null);
+  if (error){ toast('Erro ao carregar turmas dos atletas: ' + error.message, 'err'); return; }
+  const mapa = {};
+  (data || []).forEach(r => {
+    if (!mapa[r.atleta_id]) mapa[r.atleta_id] = [];
+    mapa[r.atleta_id].push(r.turma_id);
+  });
+  state.turmaAtletasMap = mapa;
+  state.turmaAtletasCarregado = true;
+}
+
 async function carregarSessoes(){
   const { data, error } = await sb
     .from('v_sessao_resumo')
@@ -373,10 +596,41 @@ async function carregarSessoes(){
   state.sessoesCarregadas = true;
 }
 
+async function carregarTestes(){
+  const { data, error } = await sb.from('testes').select('*').eq('ativo', true).order('nome');
+  if (error){ toast('Erro ao carregar testes: ' + error.message, 'err'); return; }
+  state.testes = data || [];
+  state.testesCarregados = true;
+}
+
+async function carregarResultadosTestes(){
+  const { data, error } = await sb
+    .from('resultados_testes')
+    .select('*, testes(nome, unidade, direcao, categoria_teste), atletas(nome)')
+    .order('data', { ascending: false })
+    .limit(300);
+  if (error){ toast('Erro ao carregar resultados de testes: ' + error.message, 'err'); return; }
+  state.resultadosTestes = data || [];
+  state.resultadosTestesCarregados = true;
+}
+
+function formatarDataBr(dataIso){
+  if (!dataIso) return '—';
+  return new Date(dataIso + 'T00:00:00').toLocaleDateString('pt-BR');
+}
+
 /* ---------------------------- navegação entre abas ---------------------------- */
 
 async function irParaAba(aba){
   state.aba = aba;
+  if (aba === 'inicio'){
+    state.view = 'dashboard';
+    render();
+    if (!state.competicoesCarregadas) await carregarCompeticoes();
+    if (!state.sessoesCarregadas) await carregarSessoes();
+    render();
+    return;
+  }
   if (aba === 'atletas'){
     state.view = 'lista';
     render();
@@ -480,6 +734,7 @@ function abrirNovaFicha(){
   state.fichaId = null;
   state.fichaOriginal = { ...CAMPOS_VAZIOS };
   state.fichaToken = null; // atleta novo ainda não tem link — só existe depois de salvar
+  state.fichaResultadosTestes = [];
   state.view = 'ficha';
   render();
 }
@@ -490,15 +745,23 @@ async function abrirFicha(id){
   state.fichaId = id;
   state.fichaOriginal = { ...CAMPOS_VAZIOS, ...at };
   state.fichaToken = undefined; // undefined = buscando
+  state.fichaResultadosTestes = undefined; // undefined = buscando
   state.view = 'ficha';
   render();
 
-  const [{ data, error }] = await Promise.all([
+  const [tokenResp, testesResp] = await Promise.all([
     sb.from('tokens_atleta').select('token').eq('atleta_id', id).eq('revogado', false).limit(1).maybeSingle(),
+    sb.from('resultados_testes').select('*, testes(nome, unidade, direcao)').eq('atleta_id', id)
+      .order('data', { ascending: false }).limit(20),
     state.estatisticasCarregadas ? Promise.resolve() : carregarEstatisticas(),
   ]);
-  if (error){ console.error(error); state.fichaToken = null; render(); return; }
-  state.fichaToken = data?.token || null;
+
+  if (tokenResp.error){ console.error(tokenResp.error); state.fichaToken = null; }
+  else state.fichaToken = tokenResp.data?.token || null;
+
+  if (testesResp?.error){ console.error(testesResp.error); state.fichaResultadosTestes = []; }
+  else state.fichaResultadosTestes = testesResp?.data || [];
+
   render();
 }
 
@@ -607,6 +870,97 @@ async function salvarFicha(ev){
   toast('Atleta salvo.', 'ok');
   await carregarAtletas();
   voltarParaLista();
+}
+
+// Exclusão real do cadastro. Duplas e rallies referenciam o atleta sem cascata
+// (de propósito — não queremos apagar histórico de jogo sozinho), então um
+// atleta com jogos registrados não pode ser excluído; nesse caso oferecemos
+// marcar como Inativo em vez disso, que já tira ele das listas e filtros padrão.
+async function excluirAtleta(){
+  if (!state.fichaId) return;
+  const nome = state.fichaOriginal?.nome || 'este atleta';
+  if (!confirm(`Excluir ${nome} definitivamente?\n\nIsso apaga o cadastro e não pode ser desfeito.`)) return;
+
+  const btn = document.getElementById('btn-excluir-ficha');
+  if (btn){ btn.disabled = true; btn.textContent = 'Excluindo…'; }
+
+  const resp = await sb.from('atletas').delete().eq('id', state.fichaId);
+
+  if (resp.error){
+    if (btn){ btn.disabled = false; btn.textContent = 'Excluir atleta'; }
+
+    if (resp.error.code === '23503'){ // foreign_key_violation
+      const marcarInativo = confirm(
+        `Não dá pra excluir ${nome}: já tem duplas ou pontos de jogo registrados no histórico dele.\n\n` +
+        `Quer marcar como Inativo em vez disso? Mantém o histórico e tira ele da lista de ativos.`
+      );
+      if (marcarInativo){
+        const respInativo = await sb.from('atletas').update({ status: 'inativo' }).eq('id', state.fichaId);
+        if (respInativo.error){ toast('Não foi possível atualizar: ' + respInativo.error.message, 'err'); return; }
+        toast('Atleta marcado como inativo.', 'ok');
+        await carregarAtletas();
+        voltarParaLista();
+      }
+      return;
+    }
+
+    toast('Não foi possível excluir: ' + resp.error.message, 'err');
+    return;
+  }
+
+  toast('Atleta excluído.', 'ok');
+  await carregarAtletas();
+  voltarParaLista();
+}
+
+/* ---------------------------- revisão de categorias por idade ---------------------------- */
+
+function abrirRevisaoCategorias(){
+  const pendentes = categoriasParaRevisar();
+  state.revisaoSelecionados = new Set(pendentes.map(x => x.atleta.id));
+  state.view = 'categorias-revisao';
+  render();
+}
+
+function voltarDaRevisaoCategorias(){
+  state.view = 'lista';
+  state.revisaoSelecionados = null;
+  render();
+}
+
+function toggleSelecaoRevisao(atletaId){
+  const s = state.revisaoSelecionados;
+  s.has(atletaId) ? s.delete(atletaId) : s.add(atletaId);
+  render();
+}
+
+async function aplicarRevisaoCategorias(){
+  const pendentes = categoriasParaRevisar().filter(x => state.revisaoSelecionados.has(x.atleta.id));
+  if (pendentes.length === 0){ toast('Nenhum atleta selecionado.', 'err'); return; }
+
+  const btn = document.getElementById('btn-aplicar-revisao');
+  if (btn){ btn.disabled = true; btn.textContent = 'Aplicando…'; }
+
+  const resultados = await Promise.all(pendentes.map(x =>
+    sb.from('atletas').update({ categoria_id: x.sugestao.id }).eq('id', x.atleta.id)
+  ));
+  const comErro = resultados.filter(r => r.error);
+
+  if (comErro.length){
+    toast(`${comErro.length} atualiza${comErro.length===1?'ção falhou':'ções falharam'}: ${comErro[0].error.message}`, 'err');
+    if (btn){ btn.disabled = false; btn.textContent = `Aplicar ${pendentes.length} atualiza${pendentes.length===1?'ção':'ções'}`; }
+    return;
+  }
+
+  toast(`Categoria atualizada para ${pendentes.length} atleta${pendentes.length===1?'':'s'}.`, 'ok');
+  await carregarAtletas();
+  voltarDaRevisaoCategorias();
+}
+
+function usarCategoriaSugerida(categoriaId){
+  sincronizarFichaDoDom();
+  state.fichaOriginal.categoria_id = categoriaId;
+  render();
 }
 
 /* ---------------------------- importação em massa ---------------------------- */
@@ -925,6 +1279,15 @@ async function salvarTurma(ev){
   }
 }
 
+// Mantém state.turmaAtletasMap (usado no filtro/coluna de turma em Atletas)
+// em sincronia com as mudanças otimistas de membro feitas aqui.
+function atualizarTurmaAtletasMapLocal(atletaId, turmaId, adicionar){
+  const atual = state.turmaAtletasMap[atletaId] || [];
+  state.turmaAtletasMap[atletaId] = adicionar
+    ? (atual.includes(turmaId) ? atual : [...atual, turmaId])
+    : atual.filter(id => id !== turmaId);
+}
+
 // Toggle otimista: atualiza a tela na hora e só depois confirma no banco.
 // Se der erro, desfaz e avisa — melhor que travar o clique esperando a rede.
 async function toggleMembroTurma(atletaId){
@@ -933,6 +1296,7 @@ async function toggleMembroTurma(atletaId){
 
   sincronizarTurmaDoDom();
   estava ? state.turmaMembrosIds.delete(atletaId) : state.turmaMembrosIds.add(atletaId);
+  atualizarTurmaAtletasMapLocal(atletaId, turmaId, !estava);
   render();
 
   const resp = estava
@@ -945,6 +1309,7 @@ async function toggleMembroTurma(atletaId){
   if (resp.error){
     toast('Não deu pra atualizar: ' + resp.error.message, 'err');
     estava ? state.turmaMembrosIds.add(atletaId) : state.turmaMembrosIds.delete(atletaId);
+    atualizarTurmaAtletasMapLocal(atletaId, turmaId, estava);
     render();
   }
 }
@@ -1012,6 +1377,7 @@ async function salvarNovaSessao(ev){
 }
 
 async function abrirSessaoDetalhe(id){
+  state.aba = 'treinos';
   state.view = 'sessao-detail';
   state.sessaoAtual = { id, carregando: true };
   render();
@@ -1069,6 +1435,280 @@ async function adicionarAtletaNaSessao(atletaId){
   render();
 }
 
+/* ---------------------------- testes físicos ---------------------------- */
+
+// Passo a passo de aplicação de cada teste — não veio do banco (o campo
+// "protocolo" de ft.testes é só um resuminho de uma linha); é conteúdo fixo
+// aqui no app, casado pelo nome exato do teste em ft.testes. Se um teste
+// novo for cadastrado no banco sem entrada aqui, o app simplesmente não
+// mostra o "Como aplicar" pra ele — sem quebrar nada.
+const GUIA_TESTES = {
+  'Salto vertical (CMJ)': {
+    objetivo: 'Potência de salto vertical, sem corrida de aproximação.',
+    material: 'Fita métrica ou trena, parede lisa, giz ou fita crepe (ou um jump mat / app de celular, se tiver).',
+    passos: [
+      'Atleta em pé, de lado ou de frente pra parede, mãos na cintura durante todo o movimento (sem balançar os braços).',
+      'Marca a altura do alcance parado: braço estendido, na ponta dos dedos, encostando na parede.',
+      'A partir da posição em pé, o atleta desce rápido até um agachamento parcial (contramovimento) e já explode pra cima o mais alto possível, tocando a parede no ponto mais alto.',
+      'Aterrissagem com os joelhos flexionados, de forma controlada.',
+      'A altura do salto é a diferença entre o ponto tocado no ar e o alcance parado.',
+    ],
+    tentativas: '3 tentativas, com pelo menos 30-60s de descanso entre elas. Considera a melhor.',
+    cuidados: 'Não vale correr antes de saltar — é só o contramovimento, parado. Se usar app de celular (tipo medição por tempo de voo), manter a mesma metodologia em todas as coletas pra poder comparar ao longo do tempo.',
+  },
+  'Salto com aproximação': {
+    objetivo: 'Potência de salto específica do ataque, com corrida de aproximação.',
+    material: 'Fita métrica, parede ou rede/fita marcada em centímetros (ou Vertec, se tiver).',
+    passos: [
+      'Marca o alcance parado do atleta, igual no CMJ (braço estendido, na ponta dos dedos).',
+      'Atleta faz a aproximação de ataque que usa de verdade no jogo (2 a 4 passos), salta e toca o ponto mais alto que conseguir.',
+      'A altura do salto é a diferença entre o ponto tocado no ar e o alcance parado.',
+    ],
+    tentativas: '3 tentativas, com descanso suficiente pra não cansar. Considera a melhor.',
+    cuidados: 'Deixa o atleta usar a aproximação natural dele, sem forçar um número de passos — o objetivo é medir o salto que ele realmente usa em jogo.',
+  },
+  'Alcance de ataque': {
+    objetivo: 'Alcance estático de ataque (referência antropométrica, sem saltar).',
+    material: 'Fita métrica ou trena, parede lisa.',
+    passos: [
+      'Atleta em pé, descalço, encostado ou próximo à parede, pés totalmente apoiados no chão.',
+      'Estica um braço (o de ataque) reto para cima ao máximo, com a mão aberta.',
+      'Mede do chão até a ponta do dedo médio.',
+    ],
+    tentativas: '1 medição é suficiente — não é um teste de esforço, é uma medida antropométrica.',
+    cuidados: 'Não deixa o atleta ficar na ponta dos pés — é alcance parado, com o calcanhar no chão.',
+  },
+  'Alcance de bloqueio': {
+    objetivo: 'Alcance estático de bloqueio (referência antropométrica, sem saltar).',
+    material: 'Fita métrica ou trena, parede lisa.',
+    passos: [
+      'Atleta em pé, descalço, pés totalmente apoiados no chão.',
+      'Estica os dois braços para cima ao máximo, mãos próximas uma da outra (como na postura de bloqueio).',
+      'Mede do chão até a ponta dos dedos mais altos.',
+    ],
+    tentativas: '1 medição é suficiente.',
+    cuidados: 'Mesma lógica do alcance de ataque: sem ponta de pé, é alcance parado.',
+  },
+  'Sprint 5 m na areia': {
+    objetivo: 'Velocidade de saída/aceleração curta, no ambiente real de jogo (areia).',
+    material: 'Trena ou marcação de 5 metros na areia, cronômetro (ou fotocélulas, se tiver).',
+    passos: [
+      'Marca a linha de largada e a linha de chegada a 5 metros de distância, na areia.',
+      'Atleta começa parado, com um pé na linha de largada.',
+      'Ao sinal, sai o mais rápido possível e cruza a linha de chegada.',
+      'Cronometra do sinal de saída até o atleta cruzar a linha de 5m.',
+    ],
+    tentativas: '2 tentativas, com descanso completo entre elas (pelo menos 2-3 min). Considera o melhor tempo.',
+    cuidados: 'Sempre medir na mesma areia/condição, se possível — areia funda ou molhada muda bastante o tempo. Anote a condição no campo "Condições" ao registrar.',
+  },
+  'Sprint 10 m na areia': {
+    objetivo: 'Velocidade de aceleração, distância um pouco maior que o sprint de 5m.',
+    material: 'Trena ou marcação de 10 metros na areia, cronômetro.',
+    passos: [
+      'Mesma lógica do sprint de 5m, só que com a linha de chegada a 10 metros.',
+      'Atleta começa parado, sai ao sinal e cronometra até cruzar os 10m.',
+    ],
+    tentativas: '2 tentativas, com descanso completo entre elas. Considera o melhor tempo.',
+    cuidados: 'Mesma recomendação do sprint de 5m: anotar a condição da areia pra poder comparar ao longo do tempo.',
+  },
+  'Teste em T (agilidade)': {
+    objetivo: 'Agilidade e mudança de direção.',
+    material: '4 cones ou marcadores, trena, cronômetro.',
+    passos: [
+      'Monta um "T" com os cones: um cone de partida (A), um cone 10m à frente (B), e dois cones 5m para cada lado do cone B (C à esquerda, D à direita). Em quadra de areia menor, pode reduzir as distâncias proporcionalmente — o importante é manter o mesmo layout em todas as coletas.',
+      'Atleta parte de A, sprinta até B e toca o cone.',
+      'Desloca lateralmente (sem cruzar as pernas) até C e toca o cone.',
+      'Desloca lateralmente até D (passando por B) e toca o cone.',
+      'Volta lateralmente até B e toca o cone.',
+      'Corre de costas (backpedal) de volta até A.',
+      'Cronometra do início até cruzar A de novo.',
+    ],
+    tentativas: '2 a 3 tentativas, com descanso completo entre elas. Considera o melhor tempo.',
+    cuidados: 'Se o atleta cruzar as pernas nos deslocamentos laterais, ou não tocar algum cone, a tentativa não vale — repete.',
+  },
+  'Arremesso de medicine ball': {
+    objetivo: 'Potência de tronco/braços.',
+    material: 'Medicine ball de 3 kg, trena, parede ou banco para apoiar as costas.',
+    passos: [
+      'Atleta sentado no chão, pernas estendidas à frente, costas apoiadas numa parede (pra não usar o tronco pra "roubar" impulso).',
+      'Segura a bola com as duas mãos, na altura do peito.',
+      'Arremessa a bola para frente com força máxima, tipo um passe de peito.',
+      'Mede a distância do ponto de partida até onde a bola primeiro toca o chão.',
+    ],
+    tentativas: '3 tentativas, com descanso entre elas. Considera a melhor.',
+    cuidados: 'As costas precisam ficar coladas na parede/apoio durante o arremesso inteiro — se o atleta despregar as costas antes de soltar a bola, a tentativa não vale.',
+  },
+  'Yo-Yo IR1': {
+    objetivo: 'Capacidade aeróbia intermitente (resistência com paradas e arrancadas, parecido com o esforço de um jogo).',
+    material: 'Espaço de pelo menos 25m, cones, áudio do protocolo Yo-Yo Intermittent Recovery Test Level 1 (tem faixas prontas pra achar).',
+    passos: [
+      'Marca duas linhas a 20m de distância, e uma terceira linha 5m atrás de uma delas (área de recuperação).',
+      'Atleta corre os 20m no ritmo marcado pelo bipe do áudio, toca a linha, e tem 10 segundos de recuperação ativa (trotando até a linha dos 5m e voltando) antes do próximo tiro.',
+      'A cada patamar (nível), o ritmo exigido pelo áudio aumenta.',
+      'O teste acaba quando o atleta não consegue mais chegar na linha no tempo do bipe duas vezes seguidas, ou para por exaustão.',
+      'Registra o nível e o estágio final atingido (ou a distância total percorrida, se preferir converter).',
+    ],
+    tentativas: 'É um teste único, até a exaustão — não repete no mesmo dia.',
+    cuidados: 'Teste de esforço máximo: garanta aquecimento antes e não aplique em atleta se recuperando de lesão ou doente. Anote o nível/estágio no campo "valor" (em metros, se for converter, ou documente o critério usado nas observações pra manter consistência entre coletas).',
+  },
+  'Sentar e alcançar': {
+    objetivo: 'Flexibilidade de posterior de coxa e lombar.',
+    material: 'Banco de Wells (ou uma caixa/banco com régua fixada, com o zero na borda onde encostam os pés).',
+    passos: [
+      'Atleta sentado no chão, descalço, pernas estendidas, plantas dos pés encostadas na borda do banco.',
+      'Com as mãos sobrepostas, estende os braços à frente e vai deslizando devagar sobre a régua o mais longe possível, sem "chutar" o movimento (sem impulso, sem dobrar os joelhos).',
+      'Mantém a posição de alcance máximo por 1-2 segundos.',
+      'Registra a distância alcançada.',
+    ],
+    tentativas: '3 tentativas, considera a melhor.',
+    cuidados: 'Joelhos precisam ficar esticados o tempo todo — se dobrarem, a tentativa não vale. Movimento é lento e controlado, sem solavanco.',
+  },
+};
+
+function guiaDoTeste(nomeTeste){
+  return GUIA_TESTES[nomeTeste] || null;
+}
+
+function renderGuiaTeste(guia){
+  if (!guia) return '';
+  return `
+    <div style="font-size:.85rem;line-height:1.5">
+      <p style="margin:0 0 8px"><strong>Objetivo:</strong> ${escapeHtml(guia.objetivo)}</p>
+      <p style="margin:0 0 8px"><strong>Material:</strong> ${escapeHtml(guia.material)}</p>
+      <p style="margin:0 0 4px"><strong>Como aplicar:</strong></p>
+      <ol style="margin:0 0 8px;padding-left:20px">
+        ${guia.passos.map(p => `<li style="margin-bottom:4px">${escapeHtml(p)}</li>`).join('')}
+      </ol>
+      <p style="margin:0 0 8px"><strong>Tentativas:</strong> ${escapeHtml(guia.tentativas)}</p>
+      <p style="margin:0;color:var(--b)"><strong>Cuidado:</strong> ${escapeHtml(guia.cuidados)}</p>
+    </div>`;
+}
+
+function atualizarFiltroTestes(campo, valor){
+  state.filtroTestes[campo] = valor;
+  render();
+}
+
+function resultadosTestesFiltrados(){
+  return state.resultadosTestes.filter(r => {
+    if (state.filtroTestes.atletaId && r.atleta_id !== state.filtroTestes.atletaId) return false;
+    if (state.filtroTestes.testeId && String(r.teste_id) !== state.filtroTestes.testeId) return false;
+    return true;
+  });
+}
+
+// Bateria = registrar o mesmo teste, na mesma data, pra vários atletas de uma
+// vez — o jeito real de fazer uma medição trimestral de time inteiro sem
+// abrir a ficha de cada um.
+function abrirNovaBateria(){
+  state.testeBateriaForm = {
+    teste_id: state.testes[0]?.id ? String(state.testes[0].id) : '',
+    data: new Date().toISOString().slice(0, 10),
+    bateria: '', avaliador: '', condicoes: '', busca: '',
+    valores: {},
+  };
+  state.view = 'teste-bateria';
+  render();
+}
+
+function voltarDaBateria(){
+  state.view = 'testes';
+  state.testeBateriaForm = null;
+  render();
+}
+
+function sincronizarBateriaDoDom(){
+  const f = state.testeBateriaForm;
+  const g = (id) => document.getElementById(id);
+  if (g('tb-data'))      f.data = g('tb-data').value;
+  if (g('tb-bateria'))   f.bateria = g('tb-bateria').value;
+  if (g('tb-avaliador')) f.avaliador = g('tb-avaliador').value;
+  if (g('tb-condicoes')) f.condicoes = g('tb-condicoes').value;
+  document.querySelectorAll('[data-valor-atleta]').forEach(el => {
+    f.valores[el.dataset.valorAtleta] = el.value;
+  });
+}
+
+function setTesteDaBateria(testeId){
+  sincronizarBateriaDoDom();
+  state.testeBateriaForm.teste_id = testeId;
+  render();
+}
+
+function atualizarBuscaBateria(valor){
+  sincronizarBateriaDoDom();
+  state.testeBateriaForm.busca = valor;
+  render();
+}
+
+function atualizarValorBateria(atletaId, valor){
+  state.testeBateriaForm.valores[atletaId] = valor;
+}
+
+async function salvarBateria(ev){
+  ev.preventDefault();
+  sincronizarBateriaDoDom();
+  const f = state.testeBateriaForm;
+
+  if (!f.teste_id){ toast('Escolha o teste.', 'err'); return; }
+  if (!f.data){ toast('Escolha a data.', 'err'); return; }
+
+  const linhas = Object.entries(f.valores)
+    .filter(([, v]) => v !== '' && v != null)
+    .map(([atletaId, v]) => ({
+      teste_id: Number(f.teste_id),
+      atleta_id: atletaId,
+      data: f.data,
+      bateria: f.bateria || null,
+      valor: Number(String(v).replace(',', '.')),
+      condicoes: f.condicoes || null,
+      avaliador: f.avaliador || null,
+    }));
+
+  if (linhas.length === 0){ toast('Preencha o resultado de pelo menos um atleta.', 'err'); return; }
+  const invalidas = linhas.filter(l => Number.isNaN(l.valor));
+  if (invalidas.length){ toast('Tem resultado inválido em algum atleta — confira os números.', 'err'); return; }
+
+  const btn = document.getElementById('btn-salvar-bateria');
+  if (btn){ btn.disabled = true; btn.textContent = 'Salvando…'; }
+
+  // upsert: rodar a mesma bateria de novo na mesma data corrige em vez de duplicar
+  const resp = await sb.from('resultados_testes').upsert(linhas, { onConflict: 'teste_id,atleta_id,data' }).select();
+
+  if (resp.error){
+    toast('Não foi possível salvar: ' + resp.error.message, 'err');
+    if (btn){ btn.disabled = false; btn.textContent = 'Salvar resultados'; }
+    return;
+  }
+
+  toast(`${linhas.length} resultado${linhas.length===1?'':'s'} salvo${linhas.length===1?'':'s'}.`, 'ok');
+  state.resultadosTestesCarregados = false;
+  await carregarResultadosTestes();
+  voltarDaBateria();
+}
+
+async function abrirGuiaTestes(){
+  state.view = 'testes-guia';
+  render();
+  if (!state.testesCarregados) { await carregarTestes(); render(); }
+}
+
+function voltarDoGuiaTestes(){
+  state.view = 'testes';
+  render();
+}
+
+// Atalho a partir da ficha do atleta: já filtra a lista de testes por ele.
+async function verTestesDoAtleta(atletaId){
+  state.aba = 'treinos';
+  state.filtroTestes = { atletaId, testeId: '' };
+  state.view = 'testes';
+  render();
+  if (!state.testesCarregados) await carregarTestes();
+  if (!state.resultadosTestesCarregados) await carregarResultadosTestes();
+  render();
+}
+
 /* ---------------------------- jogos / scout ---------------------------- */
 
 const NIVEIS_COMPETICAO = [
@@ -1115,6 +1755,7 @@ async function voltarParaEvento(){
 /* -------- eventos (competições) -------- */
 
 async function abrirEvento(competicaoId){
+  state.aba = 'jogos';
   state.view = 'evento-detalhe';
   state.eventoAtualId = competicaoId;
   state.eventoAtual = { carregando: true };
@@ -1292,6 +1933,19 @@ function nomeAdversario(ja, num){
 
 async function abrirScout(jogoId){
   state.view = 'jogo-scout';
+
+  // Se esse jogo já foi aberto antes neste aparelho, o estado local é sempre
+  // igual ou mais atualizado que o servidor (a fila de sincronização garante
+  // isso) — então retoma dali direto, sem precisar de sinal.
+  const persistido = carregarJogoAtualOffline(jogoId);
+  if (persistido){
+    state.jogoAtual = { ...persistido, salvando: false };
+    render();
+    if (!state.subtipos) carregarSubtipos().then(render).catch(() => {});
+    processarFilaSync();
+    return;
+  }
+
   state.jogoAtual = { carregando: true };
   render();
 
@@ -1301,7 +1955,11 @@ async function abrirScout(jogoId){
     sb.from('jogos').select('*, duplas(id, atleta_1_id, atleta_2_id), adversarios(*), competicoes(nome, nivel)').eq('id', jogoId).single(),
     sb.from('sets').select('*').eq('jogo_id', jogoId).order('numero'),
   ]);
-  if (e1 || e2){ toast('Erro ao abrir o jogo: ' + (e1 || e2).message, 'err'); voltarParaEvento(); return; }
+  if (e1 || e2){
+    toast('Sem conexão pra abrir esse jogo pela primeira vez neste aparelho — tenta de novo com sinal.', 'err');
+    voltarParaEvento();
+    return;
+  }
 
   const setAtual = sets[sets.length - 1];
   const { data: rallies, error: e3 } = await sb.from('rallies').select('*').eq('set_id', setAtual.id).order('numero');
@@ -1313,6 +1971,7 @@ async function abrirScout(jogoId){
     passo: null, acaoEscolhida: null, salvando: false, avisoSet: null,
     finalizado: jogo.sets_pro === 2 || jogo.sets_contra === 2,
   };
+  persistirJogoAtualOffline();
   render();
 }
 
@@ -1362,9 +2021,13 @@ function sacadorLadoParaProximaRally(){
   return ja.rallies[ja.rallies.length - 1].ponto_para;
 }
 
-async function registrarPonto(ladoVencedor, origem, atletaId, subtipoId, adversarioNum){
+// Grava local primeiro, sempre — o jogo nunca espera a rede pra continuar.
+// A tentativa de sincronizar com o Supabase acontece "por trás", sem travar
+// a próxima jogada.
+function registrarPonto(ladoVencedor, origem, atletaId, subtipoId, adversarioNum){
   const ja = state.jogoAtual;
   if (ja.salvando) return;
+  ja.salvando = true;
 
   const ultimo = ja.rallies[ja.rallies.length - 1];
   const proPro = ultimo ? ultimo.placar_pro : 0;
@@ -1373,10 +2036,8 @@ async function registrarPonto(ladoVencedor, origem, atletaId, subtipoId, adversa
   const novoContra = ladoVencedor === 'eles' ? proContra + 1 : proContra;
   const sacadorLado = sacadorLadoParaProximaRally();
 
-  ja.salvando = true;
-  render();
-
-  const resp = await sb.from('rallies').insert({
+  const novaRally = {
+    id: novoUuid(),
     set_id: ja.setAtualId,
     numero: ja.rallies.length + 1,
     ponto_para: ladoVencedor,
@@ -1388,26 +2049,26 @@ async function registrarPonto(ladoVencedor, origem, atletaId, subtipoId, adversa
     sacador_atleta_id: null,
     placar_pro: novoPro,
     placar_contra: novoContra,
-  }).select().single();
-
-  ja.salvando = false;
-
-  if (resp.error){ toast('Não deu pra salvar o ponto: ' + resp.error.message, 'err'); render(); return; }
-
-  ja.rallies.push(resp.data);
+  };
+  ja.rallies.push(novaRally);
   ja.passo = null;
   ja.acaoEscolhida = null;
+  ja.salvando = false;
 
   const setAtual = ja.sets.find(s => s.id === ja.setAtualId);
   setAtual.pontos_pro = novoPro;
   setAtual.pontos_contra = novoContra;
-  await sb.from('sets').update({ pontos_pro: novoPro, pontos_contra: novoContra }).eq('id', ja.setAtualId);
 
-  await checarFimDeSet();
+  enfileirarOperacao('rallies', 'insert', novaRally.id, novaRally);
+  enfileirarOperacao('sets', 'update', ja.setAtualId, { pontos_pro: novoPro, pontos_contra: novoContra });
+
+  checarFimDeSet();
+  persistirJogoAtualOffline();
   render();
+  processarFilaSync();
 }
 
-async function checarFimDeSet(){
+function checarFimDeSet(){
   const ja = state.jogoAtual;
   const setAtual = ja.sets.find(s => s.id === ja.setAtualId);
   const limite = ja.sets.length === 3 ? 15 : 21;
@@ -1418,7 +2079,7 @@ async function checarFimDeSet(){
   const nosGanhamos = p > c;
   ja.jogo.sets_pro    += nosGanhamos ? 1 : 0;
   ja.jogo.sets_contra += nosGanhamos ? 0 : 1;
-  await sb.from('jogos').update({ sets_pro: ja.jogo.sets_pro, sets_contra: ja.jogo.sets_contra }).eq('id', ja.jogo.id);
+  enfileirarOperacao('jogos', 'update', ja.jogo.id, { sets_pro: ja.jogo.sets_pro, sets_contra: ja.jogo.sets_contra });
 
   if (ja.jogo.sets_pro === 2 || ja.jogo.sets_contra === 2){
     ja.finalizado = true;
@@ -1429,56 +2090,58 @@ async function checarFimDeSet(){
     return;
   }
 
-  const resp = await sb.from('sets').insert({
-    jogo_id: ja.jogo.id, numero: setAtual.numero + 1,
-    lado_inicial: setAtual.lado_inicial === 'A' ? 'B' : 'A',
-  }).select().single();
-  if (resp.error){ toast('Erro ao criar o próximo set: ' + resp.error.message, 'err'); return; }
+  const novoSet = {
+    id: novoUuid(), jogo_id: ja.jogo.id, numero: setAtual.numero + 1,
+    lado_inicial: setAtual.lado_inicial === 'A' ? 'B' : 'A', pontos_pro: 0, pontos_contra: 0,
+  };
+  enfileirarOperacao('sets', 'insert', novoSet.id, novoSet);
 
-  ja.sets.push(resp.data);
-  ja.setAtualId = resp.data.id;
+  ja.sets.push(novoSet);
+  ja.setAtualId = novoSet.id;
   ja.rallies = [];
   ja.avisoSet = {
     tipo: 'set', numeroSetEncerrado: setAtual.numero, pontosPro: p, pontosContra: c,
-    proximoSetNumero: resp.data.numero,
+    proximoSetNumero: novoSet.numero,
   };
 }
 
 function confirmarAvisoSet(){
   state.jogoAtual.avisoSet = null;
+  persistirJogoAtualOffline();
   render();
 }
 
-async function desfazerUltimoPonto(){
+function desfazerUltimoPonto(){
   const ja = state.jogoAtual;
   if (!ja.rallies.length) return;
   if (!confirm('Desfazer o último ponto marcado?')) return;
 
-  const ultimo = ja.rallies[ja.rallies.length - 1];
-  const resp = await sb.from('rallies').delete().eq('id', ultimo.id);
-  if (resp.error){ toast('Não deu pra desfazer: ' + resp.error.message, 'err'); return; }
+  const ultimo = ja.rallies.pop();
+  enfileirarOperacao('rallies', 'delete', ultimo.id, null);
 
-  ja.rallies.pop();
   const anterior = ja.rallies[ja.rallies.length - 1];
   const novoPro = anterior ? anterior.placar_pro : 0;
   const novoContra = anterior ? anterior.placar_contra : 0;
   const setAtual = ja.sets.find(s => s.id === ja.setAtualId);
   setAtual.pontos_pro = novoPro;
   setAtual.pontos_contra = novoContra;
-  await sb.from('sets').update({ pontos_pro: novoPro, pontos_contra: novoContra }).eq('id', ja.setAtualId);
+  enfileirarOperacao('sets', 'update', ja.setAtualId, { pontos_pro: novoPro, pontos_contra: novoContra });
 
   toast('Ponto desfeito.', 'ok');
+  persistirJogoAtualOffline();
   render();
+  processarFilaSync();
 }
 
-async function definirSubtipoRally(rallyId, subtipoId){
+function definirSubtipoRally(rallyId, subtipoId){
   const valor = subtipoId ? Number(subtipoId) : null;
-  const resp = await sb.from('rallies').update({ subtipo_id: valor }).eq('id', rallyId);
-  if (resp.error){ toast('Erro ao salvar o detalhe: ' + resp.error.message, 'err'); return; }
   const r = state.jogoAtual.rallies.find(x => x.id === rallyId);
   if (r) r.subtipo_id = valor;
+  enfileirarOperacao('rallies', 'update', rallyId, { subtipo_id: valor });
   toast('Detalhe salvo.', 'ok');
+  persistirJogoAtualOffline();
   render();
+  processarFilaSync();
 }
 
 /* ---------------------------- estatísticas ---------------------------- */
@@ -1590,15 +2253,27 @@ function atualizarFiltro(campo, valor){
   render();
 }
 
+function limparFiltrosAtletas(){
+  state.filtro = { busca: '', categoria: '', status: '', turma: '' };
+  render();
+}
+
 function atletasFiltrados(){
   const busca = state.filtro.busca.toLowerCase();
   return state.atletas.filter(a => {
     if (state.filtro.status && a.status !== state.filtro.status) return false;
     if (state.filtro.categoria && String(a.categoria_id) !== state.filtro.categoria) return false;
+    if (state.filtro.turma && !(state.turmaAtletasMap[a.id] || []).map(String).includes(state.filtro.turma)) return false;
     if (busca && !(a.nome || '').toLowerCase().includes(busca) &&
                  !(a.apelido || '').toLowerCase().includes(busca)) return false;
     return true;
   });
+}
+
+function contagemAtletasPorStatus(){
+  const c = { ativo: 0, inativo: 0, afastado: 0 };
+  state.atletas.forEach(a => { c[a.status] = (c[a.status] || 0) + 1; });
+  return c;
 }
 
 /* ============================== RENDER ============================== */
@@ -1607,14 +2282,19 @@ function render(){
   if (state.view === 'loading')       return renderLoading();
   if (state.view === 'auth')          return renderAuth();
   if (state.view === 'bootstrap')     return renderBootstrap();
+  if (state.view === 'dashboard')     return renderDashboard();
   if (state.view === 'lista')         return renderLista();
   if (state.view === 'ficha')         return renderFicha();
   if (state.view === 'atletas-importar') return renderImportarAtletas();
+  if (state.view === 'categorias-revisao') return renderRevisaoCategorias();
   if (state.view === 'turmas')        return renderTurmas();
   if (state.view === 'turma-edit')    return renderTurmaEdit();
   if (state.view === 'sessoes')       return renderSessoes();
   if (state.view === 'sessao-edit')   return renderSessaoEdit();
   if (state.view === 'sessao-detail') return renderSessaoDetail();
+  if (state.view === 'testes')        return renderTestes();
+  if (state.view === 'teste-bateria') return renderTesteBateria();
+  if (state.view === 'testes-guia')   return renderGuiaTestesPagina();
   if (state.view === 'eventos')         return renderEventos();
   if (state.view === 'evento-novo')     return renderNovoEvento();
   if (state.view === 'evento-detalhe')  return renderEventoDetalhe();
@@ -1640,6 +2320,7 @@ function renderTopbar(){
       <div class="logo">${logoSvg()} Farol Tático</div>
       ${state.user && state.usuario ? `
         <nav class="topnav">
+          <button class="${state.aba==='inicio'?'on':''}" onclick="irParaAba('inicio')">Início</button>
           <button class="${state.aba==='atletas'?'on':''}" onclick="irParaAba('atletas')">Atletas</button>
           <button class="${state.aba==='jogos'?'on':''}" onclick="irParaAba('jogos')">Jogos</button>
           <button class="${state.aba==='estatisticas'?'on':''}" onclick="irParaAba('estatisticas')">Estatísticas</button>
@@ -1659,6 +2340,7 @@ function renderSubnavTreinos(){
     <div class="subnav">
       <button class="${state.view.startsWith('sessao')?'on':''}" onclick="mostrarSessoes()">Sessões</button>
       <button class="${state.view.startsWith('turma')?'on':''}" onclick="mostrarTurmas()">Turmas</button>
+      <button class="${state.view.startsWith('teste')?'on':''}" onclick="mostrarTestes()">Testes físicos</button>
     </div>`;
 }
 
@@ -1666,6 +2348,14 @@ async function mostrarSessoes(){
   state.view = 'sessoes';
   render();
   if (!state.sessoesCarregadas) { await carregarSessoes(); render(); }
+}
+
+async function mostrarTestes(){
+  state.view = 'testes';
+  render();
+  if (!state.testesCarregados) await carregarTestes();
+  if (!state.resultadosTestesCarregados) await carregarResultadosTestes();
+  render();
 }
 
 async function mostrarTurmas(){
@@ -1723,16 +2413,106 @@ where email = '${escapeHtml(email)}';</code>
     </div>`;
 }
 
-function renderLista(){
-  const lista = atletasFiltrados();
-  const opcoesCategoria = state.categorias
-    .map(c => `<option value="${c.id}">${escapeHtml(c.nome)} (${c.sexo})</option>`).join('');
+function renderDashboard(){
+  const ativos = state.atletas.filter(a => a.status === 'ativo').length;
+  const turmasAtivas = state.turmas.filter(t => t.ativo).length;
+  const aniversariantes = aniversariantesProximos(30);
+  const eventos = proximosEventos(5);
+  const sessoes = proximasSessoes(5);
 
   app.innerHTML = `
     ${renderTopbar()}
     <div class="main">
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;flex-wrap:wrap">
+        <h1 style="flex:1">Início</h1>
+        <button class="btn btn-ghost" onclick="novoEventoDoDashboard()">+ Novo evento</button>
+        <button class="btn btn-ghost" onclick="novaSessaoDoDashboard()">+ Nova sessão</button>
+        <button class="btn btn-primary" onclick="novoAtletaDoDashboard()">+ Novo atleta</button>
+      </div>
+      <p class="muted" style="margin-bottom:16px">Visão geral da comissão técnica.</p>
+
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:20px">
+        <div class="card" style="text-align:center">
+          <div style="font-size:1.6rem;font-weight:800">${ativos}</div>
+          <div class="muted" style="font-size:.8rem">atleta${ativos===1?'':'s'} ativo${ativos===1?'':'s'}</div>
+        </div>
+        <div class="card" style="text-align:center">
+          <div style="font-size:1.6rem;font-weight:800">${turmasAtivas}</div>
+          <div class="muted" style="font-size:.8rem">turma${turmasAtivas===1?'':'s'} ativa${turmasAtivas===1?'':'s'}</div>
+        </div>
+        <div class="card" style="text-align:center">
+          <div style="font-size:1.6rem;font-weight:800">${eventos.length}</div>
+          <div class="muted" style="font-size:.8rem">evento${eventos.length===1?'':'s'} por vir</div>
+        </div>
+        <div class="card" style="text-align:center">
+          <div style="font-size:1.6rem;font-weight:800">${aniversariantes.length}</div>
+          <div class="muted" style="font-size:.8rem">aniversário${aniversariantes.length===1?'':'s'} nos próx. 30 dias</div>
+        </div>
+      </div>
+
+      <div class="section-title">Aniversariantes</div>
+      <div class="card" style="padding:4px 16px;margin-bottom:20px">
+        ${aniversariantes.length === 0 ? `<div class="empty">Ninguém faz aniversário nos próximos 30 dias.</div>` :
+          aniversariantes.map(x => `
+            <div class="presenca-row">
+              <span class="nome">${escapeHtml(x.atleta.nome)}</span>
+              <span class="muted" style="font-size:.85rem">
+                ${x.proxima.toLocaleDateString('pt-BR', {day:'2-digit', month:'2-digit'})}
+                · completa ${x.idadeQueFaz} anos · ${descricaoDiasRestantes(x.diffDias)}
+              </span>
+            </div>
+          `).join('')}
+      </div>
+
+      <div class="section-title">Próximos eventos</div>
+      <div style="margin-bottom:20px">
+        ${eventos.length === 0 ? `<div class="empty">Nenhum evento futuro cadastrado.</div>` :
+          eventos.map(c => `
+            <div class="list-item" onclick="abrirEvento('${c.id}')">
+              <div class="top">
+                <div class="titulo">${escapeHtml(c.nome)}</div>
+                <span class="pill">${escapeHtml(c.nivel)}</span>
+              </div>
+              <div class="meta">
+                ${new Date(c.data_inicio+'T00:00:00').toLocaleDateString('pt-BR')}
+                ${c.cidade ? ' · ' + escapeHtml(c.cidade) + (c.uf ? '/' + escapeHtml(c.uf) : '') : ''}
+              </div>
+            </div>
+          `).join('')}
+      </div>
+
+      <div class="section-title">Próximas sessões</div>
+      <div>
+        ${sessoes.length === 0 ? `<div class="empty">Nenhuma sessão futura agendada.</div>` :
+          sessoes.map(s => `
+            <div class="list-item" onclick="abrirSessaoDetalhe('${s.id}')">
+              <div class="top">
+                <div class="titulo">${new Date(s.data+'T00:00:00').toLocaleDateString('pt-BR', {day:'2-digit',month:'2-digit'})} · ${escapeHtml(s.tipo)}</div>
+                ${s.hora_inicio ? `<span class="pill">${escapeHtml(s.hora_inicio.slice(0,5))}</span>` : ''}
+              </div>
+              <div class="meta">${s.turma_nome ? escapeHtml(s.turma_nome) : 'Sessão avulsa'}${s.local ? ' · ' + escapeHtml(s.local) : ''}</div>
+            </div>
+          `).join('')}
+      </div>
+    </div>`;
+}
+
+function renderLista(){
+  const lista = atletasFiltrados();
+  const opcoesCategoria = state.categorias
+    .map(c => `<option value="${c.id}" ${state.filtro.categoria===String(c.id)?'selected':''}>${escapeHtml(c.nome)} (${c.sexo})</option>`).join('');
+  const opcoesTurma = state.turmas
+    .map(t => `<option value="${t.id}" ${state.filtro.turma===String(t.id)?'selected':''}>${escapeHtml(t.nome)}</option>`).join('');
+  const qtdRevisao = categoriasParaRevisar().length;
+  const cont = contagemAtletasPorStatus();
+  const filtrosAtivos = !!(state.filtro.busca || state.filtro.categoria || state.filtro.turma || state.filtro.status !== 'ativo');
+
+  app.innerHTML = `
+    ${renderTopbar()}
+    <div class="main">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;flex-wrap:wrap">
         <h1 style="flex:1">Atletas</h1>
+        <button class="btn btn-ghost" onclick="abrirRevisaoCategorias()">Revisar categorias${qtdRevisao > 0 ? ` (${qtdRevisao})` : ''}</button>
         <button class="btn btn-ghost" onclick="abrirImportarAtletas()">Importar planilha</button>
         <button class="btn btn-primary" onclick="abrirNovaFicha()">+ Novo atleta</button>
       </div>
@@ -1745,6 +2525,10 @@ function renderLista(){
           <option value="">Todas as categorias</option>
           ${opcoesCategoria}
         </select>
+        <select onchange="atualizarFiltro('turma', this.value)">
+          <option value="">Todas as turmas</option>
+          ${opcoesTurma}
+        </select>
         <select onchange="atualizarFiltro('status', this.value)">
           <option value="ativo" ${state.filtro.status==='ativo'?'selected':''}>Ativos</option>
           <option value="inativo" ${state.filtro.status==='inativo'?'selected':''}>Inativos</option>
@@ -1754,13 +2538,24 @@ function renderLista(){
       </div>
 
       ${lista.length === 0 ? `
-        <div class="empty">Nenhum atleta encontrado com esse filtro.</div>
+        <div class="empty">
+          ${state.atletas.length === 0 ? 'Nenhum atleta cadastrado ainda.' : `
+            Nenhum atleta encontrado com esse filtro.
+            <div class="muted" style="margin-top:8px;font-size:.85rem">
+              No total: ${cont.ativo||0} ativo${cont.ativo===1?'':'s'}, ${cont.inativo||0} inativo${cont.inativo===1?'':'s'},
+              ${cont.afastado||0} afastado${cont.afastado===1?'':'s'}.
+            </div>
+            ${filtrosAtivos ? `<button type="button" class="btn btn-sm" style="margin-top:10px" onclick="limparFiltrosAtletas()">Limpar filtros</button>` : ''}
+          `}
+        </div>
       ` : `
         <table>
-          <thead><tr><th>Nome</th><th>Categoria</th><th>Idade</th><th>Status</th><th></th></tr></thead>
+          <thead><tr><th>Nome</th><th>Categoria</th><th>Turma</th><th>Idade</th><th>Status</th><th></th></tr></thead>
           <tbody>
             ${lista.map(a => {
               const idade = calcIdade(a.data_nascimento);
+              const turmasDoAtleta = (state.turmaAtletasMap[a.id] || [])
+                .map(tid => state.turmas.find(t => t.id === tid)?.nome).filter(Boolean);
               return `
                 <tr class="row" onclick="abrirFicha('${a.id}')">
                   <td>
@@ -1768,6 +2563,7 @@ function renderLista(){
                     ${a.apelido ? `<div class="sub-cel">"${escapeHtml(a.apelido)}"</div>` : ''}
                   </td>
                   <td>${a.categorias ? escapeHtml(a.categorias.nome) : '—'}</td>
+                  <td>${turmasDoAtleta.length ? escapeHtml(turmasDoAtleta.join(', ')) : '—'}</td>
                   <td>${idade !== null ? idade + ' anos' : '—'}</td>
                   <td><span class="badge badge-${a.status}">${a.status}</span></td>
                   <td class="chev">›</td>
@@ -1775,6 +2571,46 @@ function renderLista(){
             }).join('')}
           </tbody>
         </table>
+      `}
+    </div>`;
+}
+
+function renderRevisaoCategorias(){
+  const pendentes = categoriasParaRevisar();
+  const anoAtual = new Date().getFullYear();
+  const selecionados = state.revisaoSelecionados || new Set();
+
+  app.innerHTML = `
+    ${renderTopbar()}
+    <div class="main">
+      <button class="btn btn-ghost btn-sm" style="margin-bottom:14px" onclick="voltarDaRevisaoCategorias()">← Voltar</button>
+      <h1>Revisar categorias por idade</h1>
+      <p class="muted" style="margin-bottom:20px">
+        Idade de categoria em ${anoAtual}: quantos anos o atleta completa neste ano civil, não a idade exata de hoje —
+        é assim que os subs mudam ano a ano. Comparando com as faixas de idade cadastradas em cada categoria.
+      </p>
+
+      ${pendentes.length === 0 ? `
+        <div class="empty">Nenhuma mudança pendente — todo mundo com data de nascimento cadastrada já está na categoria certa pra idade deste ano.</div>
+      ` : `
+        <div class="card" style="margin-bottom:16px;overflow-x:auto">
+          <table>
+            <thead><tr><th></th><th>Nome</th><th>Categoria atual</th><th>Sugestão pela idade</th></tr></thead>
+            <tbody>
+              ${pendentes.map(({ atleta, sugestao }) => `
+                <tr>
+                  <td><input type="checkbox" ${selecionados.has(atleta.id) ? 'checked' : ''} onchange="toggleSelecaoRevisao('${atleta.id}')"></td>
+                  <td>${escapeHtml(atleta.nome)}</td>
+                  <td>${atleta.categorias ? escapeHtml(atleta.categorias.nome) : '— (sem categoria)'}</td>
+                  <td><strong>${escapeHtml(sugestao.nome)}</strong></td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+        <button type="button" id="btn-aplicar-revisao" class="btn btn-primary" onclick="aplicarRevisaoCategorias()" ${selecionados.size===0?'disabled':''}>
+          Aplicar ${selecionados.size} atualiza${selecionados.size===1?'ção':'ções'}
+        </button>
       `}
     </div>`;
 }
@@ -1830,6 +2666,14 @@ function renderFicha(){
                 <option value="${c.id}" ${String(f.categoria_id)===String(c.id)?'selected':''}>${escapeHtml(c.nome)}</option>
               `).join('')}
             </select>
+            ${(() => {
+              const sug = categoriaSugerida(f);
+              if (!sug || String(sug.id) === String(f.categoria_id)) return '';
+              return `<div class="muted" style="font-size:.8rem;margin-top:6px">
+                Pela idade em ${new Date().getFullYear()}: <strong>${escapeHtml(sug.nome)}</strong>
+                <button type="button" class="btn btn-sm" style="margin-left:8px" onclick="usarCategoriaSugerida('${sug.id}')">Usar essa</button>
+              </div>`;
+            })()}
           </div>
           <div class="field">
             <label>Status</label>
@@ -1906,6 +2750,12 @@ function renderFicha(){
 
           ${editando ? `
           <div class="section">
+            <div class="section-title">Testes físicos</div>
+            ${state.fichaResultadosTestes === undefined ? `<p class="muted">Carregando…</p>` : renderResumoTestesFisicos()}
+          </div>` : ''}
+
+          ${editando ? `
+          <div class="section">
             <div class="section-title">Link do atleta</div>
             <p class="muted" style="margin-top:-4px">Mande esse endereço uma vez pelo WhatsApp. É fixo — não muda, o atleta
               abre todo dia pra responder antes e depois do treino, sem precisar de login.</p>
@@ -1921,6 +2771,7 @@ function renderFicha(){
           <div class="ficha-actions">
             <button type="submit" id="btn-salvar-ficha" class="btn btn-primary">Salvar</button>
             <button type="button" class="btn btn-ghost" onclick="voltarParaLista()">Cancelar</button>
+            ${editando ? `<button type="button" id="btn-excluir-ficha" class="btn btn-ghost btn-sm" style="margin-left:auto;color:var(--d)" onclick="excluirAtleta()">Excluir atleta</button>` : ''}
           </div>
         </form>
       </div>
@@ -2236,6 +3087,178 @@ function renderSessaoDetail(){
         </div>
       ` : ''}
     </div>`;
+}
+
+/* ---------------------------- render: testes físicos ---------------------------- */
+
+function renderTestes(){
+  const lista = resultadosTestesFiltrados();
+  const atletasComResultado = [...new Map(state.resultadosTestes.map(r => [r.atleta_id, r.atletas])).entries()];
+
+  app.innerHTML = `
+    ${renderTopbar()}
+    <div class="main">
+      ${renderSubnavTreinos()}
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;flex-wrap:wrap">
+        <h1 style="flex:1">Testes físicos</h1>
+        <button class="btn btn-ghost" onclick="abrirGuiaTestes()">Guia de aplicação</button>
+        <button class="btn btn-primary" onclick="abrirNovaBateria()">+ Nova bateria de testes</button>
+      </div>
+      <p class="muted" style="margin-bottom:16px">CMJ, sprint, agilidade, Yo-Yo e outros — os ${state.testes.length} testes já cadastrados no sistema.</p>
+
+      <div class="toolbar">
+        <select onchange="atualizarFiltroTestes('testeId', this.value)">
+          <option value="">Todos os testes</option>
+          ${state.testes.map(t => `<option value="${t.id}" ${state.filtroTestes.testeId===String(t.id)?'selected':''}>${escapeHtml(t.nome)}</option>`).join('')}
+        </select>
+        <select onchange="atualizarFiltroTestes('atletaId', this.value)">
+          <option value="">Todos os atletas</option>
+          ${atletasComResultado.map(([id, at]) => `<option value="${id}" ${state.filtroTestes.atletaId===id?'selected':''}>${escapeHtml(at?.nome || '—')}</option>`).join('')}
+        </select>
+      </div>
+
+      ${lista.length === 0 ? `
+        <div class="empty">${state.resultadosTestes.length === 0 ? 'Nenhum resultado de teste registrado ainda.' : 'Nenhum resultado encontrado com esse filtro.'}</div>
+      ` : `
+        <table>
+          <thead><tr><th>Data</th><th>Atleta</th><th>Teste</th><th>Resultado</th><th>Bateria</th></tr></thead>
+          <tbody>
+            ${lista.map(r => `
+              <tr class="row" onclick="abrirFicha('${r.atleta_id}')">
+                <td>${formatarDataBr(r.data)}</td>
+                <td>${escapeHtml(r.atletas?.nome || '—')}</td>
+                <td>${escapeHtml(r.testes?.nome || '—')}</td>
+                <td>${r.valor} ${escapeHtml(r.testes?.unidade || '')}</td>
+                <td>${escapeHtml(r.bateria || '—')}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `}
+    </div>`;
+}
+
+function renderTesteBateria(){
+  const f = state.testeBateriaForm;
+  const teste = state.testes.find(t => String(t.id) === String(f.teste_id));
+  const busca = f.busca.toLowerCase();
+  const atletas = state.atletas
+    .filter(a => a.status === 'ativo')
+    .filter(a => !busca || (a.nome||'').toLowerCase().includes(busca) || (a.apelido||'').toLowerCase().includes(busca))
+    .sort((a,b) => (a.nome||'').localeCompare(b.nome||''));
+
+  app.innerHTML = `
+    ${renderTopbar()}
+    <div class="main">
+      <button class="btn btn-ghost btn-sm" style="margin-bottom:14px" onclick="voltarDaBateria()">← Voltar</button>
+      <h1>Nova bateria de testes</h1>
+      <p class="muted" style="margin-bottom:20px">Registre o mesmo teste pra vários atletas de uma vez — do jeito que rola numa medição trimestral.
+        Deixa em branco quem não fez esse teste hoje.</p>
+
+      <form onsubmit="salvarBateria(event)">
+        <div class="card" style="margin-bottom:16px">
+          <div class="row2">
+            <div class="field">
+              <label>Teste</label>
+              <select id="tb-teste" onchange="setTesteDaBateria(this.value)">
+                ${state.testes.map(t => `<option value="${t.id}" ${String(f.teste_id)===String(t.id)?'selected':''}>${escapeHtml(t.nome)}</option>`).join('')}
+              </select>
+            </div>
+            <div class="field">
+              <label>Data</label>
+              <input id="tb-data" type="date" value="${f.data}">
+            </div>
+          </div>
+          <div class="row2">
+            <div class="field">
+              <label>Bateria (opcional)</label>
+              <input id="tb-bateria" placeholder="ex: 2026 T3" value="${escapeHtml(f.bateria)}">
+            </div>
+            <div class="field">
+              <label>Avaliador (opcional)</label>
+              <input id="tb-avaliador" value="${escapeHtml(f.avaliador)}">
+            </div>
+          </div>
+          <div class="field">
+            <label>Condições (opcional)</label>
+            <input id="tb-condicoes" placeholder="ex: areia molhada, vento forte" value="${escapeHtml(f.condicoes)}">
+          </div>
+          ${teste ? `
+            <p class="muted" style="margin:8px 0 0;font-size:.8rem">${escapeHtml(teste.protocolo || '')} — unidade: ${escapeHtml(teste.unidade)}, ${teste.direcao==='maior_melhor' ? 'quanto maior, melhor' : 'quanto menor, melhor'}</p>
+            ${guiaDoTeste(teste.nome) ? `
+              <details style="margin-top:10px">
+                <summary style="cursor:pointer;font-weight:700;font-size:.85rem;color:var(--a)">Como aplicar esse teste</summary>
+                <div style="margin-top:10px">${renderGuiaTeste(guiaDoTeste(teste.nome))}</div>
+              </details>
+            ` : ''}
+          ` : ''}
+        </div>
+
+        <div class="field">
+          <label>Buscar atleta</label>
+          <input placeholder="Filtrar por nome ou apelido…" value="${escapeHtml(f.busca)}" oninput="atualizarBuscaBateria(this.value)">
+        </div>
+
+        <div class="card" style="padding:4px 16px;margin-top:10px">
+          ${atletas.length === 0 ? `<div class="empty">Nenhum atleta ativo encontrado.</div>` :
+            atletas.map(a => `
+              <div class="presenca-row">
+                <span class="nome">${escapeHtml(a.nome)}${a.apelido ? ` <span class="muted">"${escapeHtml(a.apelido)}"</span>` : ''}</span>
+                <input type="number" step="0.01" style="width:110px" placeholder="${teste ? teste.unidade : 'valor'}"
+                       data-valor-atleta="${a.id}" value="${escapeHtml(f.valores[a.id] ?? '')}">
+              </div>
+            `).join('')}
+        </div>
+
+        <div class="ficha-actions">
+          <button type="submit" id="btn-salvar-bateria" class="btn btn-primary">Salvar resultados</button>
+          <button type="button" class="btn btn-ghost" onclick="voltarDaBateria()">Cancelar</button>
+        </div>
+      </form>
+    </div>`;
+}
+
+function renderGuiaTestesPagina(){
+  app.innerHTML = `
+    ${renderTopbar()}
+    <div class="main">
+      <button class="btn btn-ghost btn-sm" style="margin-bottom:14px" onclick="voltarDoGuiaTestes()">← Voltar</button>
+      <h1>Guia de aplicação dos testes</h1>
+      <p class="muted" style="margin-bottom:20px">Passo a passo de cada teste físico, pra quem for aplicar sem ter feito antes.</p>
+
+      ${state.testes.map(t => {
+        const guia = guiaDoTeste(t.nome);
+        return `
+          <div class="card" style="margin-bottom:14px">
+            <div class="section-title" style="margin-bottom:2px">${escapeHtml(t.nome)}</div>
+            <p class="muted" style="margin:0 0 10px;font-size:.8rem">${escapeHtml(t.categoria_teste || '')} · unidade: ${escapeHtml(t.unidade)} · ${t.direcao==='maior_melhor' ? 'quanto maior, melhor' : 'quanto menor, melhor'}</p>
+            ${guia ? renderGuiaTeste(guia) : `<p class="muted" style="font-size:.85rem">${escapeHtml(t.protocolo || 'Sem guia detalhado cadastrado ainda.')}</p>`}
+          </div>`;
+      }).join('')}
+    </div>`;
+}
+
+function renderResumoTestesFisicos(){
+  const resultados = state.fichaResultadosTestes || [];
+  if (resultados.length === 0){
+    return `<p class="muted" style="margin-top:-4px">Nenhum teste físico registrado ainda.</p>`;
+  }
+  return `
+    <table>
+      <thead><tr><th>Data</th><th>Teste</th><th>Resultado</th><th>Bateria</th></tr></thead>
+      <tbody>
+        ${resultados.map(r => `
+          <tr>
+            <td>${formatarDataBr(r.data)}</td>
+            <td>${escapeHtml(r.testes?.nome || '—')}</td>
+            <td>${r.valor} ${escapeHtml(r.testes?.unidade || '')}</td>
+            <td>${escapeHtml(r.bateria || '—')}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+    <button type="button" class="btn btn-sm" style="margin-top:10px" onclick="verTestesDoAtleta('${state.fichaId}')">Ver histórico completo</button>
+  `;
 }
 
 /* ---------------------------- render: eventos ---------------------------- */
@@ -2653,6 +3676,16 @@ function renderScout(){
         <div class="muted" style="margin-bottom:2px">Sets: ${ja.jogo.sets_pro} × ${ja.jogo.sets_contra} — Set ${setAtual.numero}</div>
         <div class="placar-set">${setAtual.pontos_pro} <span style="color:var(--tx3);font-size:1.6rem">×</span> ${setAtual.pontos_contra}</div>
       </div>
+
+      ${state.filaSync.length > 0 ? `
+        <div class="card" style="margin-bottom:16px;display:flex;align-items:center;gap:10px;border-color:var(--b)">
+          <span style="flex:1;color:var(--b);font-weight:700;font-size:.85rem">
+            ${state.sincronizando ? 'Sincronizando…' :
+              `${state.filaSync.length} atualiza${state.filaSync.length===1?'ção':'ções'} salva${state.filaSync.length===1?'':'s'} neste aparelho, sem sinal pra sincronizar ainda`}
+          </span>
+          <button type="button" class="btn btn-sm" onclick="processarFilaSync()" ${state.sincronizando?'disabled':''}>Sincronizar agora</button>
+        </div>
+      ` : ''}
 
       ${ja.avisoSet ? `
         <div class="card" style="text-align:center;margin-bottom:16px;border-color:var(--a)">
