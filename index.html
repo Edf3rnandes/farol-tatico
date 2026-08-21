@@ -257,6 +257,7 @@ let state = {
   eventoAtualId: null,      // id da competição (evento) aberta
   eventoAtual: null,        // { competicao, duplas (com resultados_competicao embutido), jogos }
   novoEvento: null,         // form de novo evento
+  novaDupla: null,          // form de nova dupla ("time"), cadastrada antes do jogo
   novoJogo: null,           // form de novo jogo
   jogoAtual: null,          // jogo aberto na tela de scout, com sets e rallies carregados
 
@@ -725,8 +726,8 @@ async function reverificarAcesso(){
 
 const CAMPOS_VAZIOS = {
   nome: '', apelido: '', sexo: '', categoria_id: '', data_nascimento: '',
-  altura_cm: '', envergadura_cm: '', alcance_ataque_cm: '', alcance_bloqueio_cm: '',
-  mao_dominante: '', lado_preferencial: '', telefone: '', email: '',
+  altura_cm: '', peso_kg: '', envergadura_cm: '', alcance_ataque_cm: '', alcance_bloqueio_cm: '',
+  mao_dominante: '', lado_preferencial: '', telefone: '', whatsapp: '', instagram: '', email: '',
   responsavel_nome: '', responsavel_telefone: '', status: 'ativo', observacoes: ''
 };
 
@@ -796,12 +797,15 @@ function lerFormFicha(){
     categoria_id: g('f-categoria') ? Number(g('f-categoria')) : null,
     data_nascimento: g('f-nascimento') || null,
     altura_cm: num(g('f-altura')),
+    peso_kg: num(g('f-peso')),
     envergadura_cm: num(g('f-envergadura')),
     alcance_ataque_cm: num(g('f-alcance-at')),
     alcance_bloqueio_cm: num(g('f-alcance-bl')),
     mao_dominante: g('f-mao') || null,
     lado_preferencial: g('f-lado') || null,
     telefone: g('f-telefone') || null,
+    whatsapp: g('f-whatsapp') || null,
+    instagram: g('f-instagram') || null,
     email: g('f-email') || null,
     responsavel_nome: g('f-resp-nome') || null,
     responsavel_telefone: g('f-resp-tel') || null,
@@ -819,9 +823,10 @@ function sincronizarFichaDoDom(){
   const g = (id) => document.getElementById(id);
   const ids = {
     nome: 'f-nome', apelido: 'f-apelido', data_nascimento: 'f-nascimento',
-    categoria_id: 'f-categoria', altura_cm: 'f-altura', envergadura_cm: 'f-envergadura',
+    categoria_id: 'f-categoria', altura_cm: 'f-altura', peso_kg: 'f-peso', envergadura_cm: 'f-envergadura',
     alcance_ataque_cm: 'f-alcance-at', alcance_bloqueio_cm: 'f-alcance-bl',
     mao_dominante: 'f-mao', lado_preferencial: 'f-lado', telefone: 'f-telefone',
+    whatsapp: 'f-whatsapp', instagram: 'f-instagram',
     email: 'f-email', responsavel_nome: 'f-resp-nome', responsavel_telefone: 'f-resp-tel',
     observacoes: 'f-obs',
   };
@@ -854,11 +859,12 @@ async function salvarFicha(ev){
   const btn = document.getElementById('btn-salvar-ficha');
   if (btn){ btn.disabled = true; btn.textContent = 'Salvando…'; }
 
+  const eraNovo = !state.fichaId;
   let resp;
   if (state.fichaId){
     resp = await sb.from('atletas').update(dados).eq('id', state.fichaId);
   } else {
-    resp = await sb.from('atletas').insert(dados);
+    resp = await sb.from('atletas').insert(dados).select().single();
   }
 
   if (resp.error){
@@ -867,9 +873,18 @@ async function salvarFicha(ev){
     return;
   }
 
-  toast('Atleta salvo.', 'ok');
   await carregarAtletas();
-  voltarParaLista();
+
+  // Atleta novo: reabre a ficha dele já mostrando o link — não faz o cadastro
+  // completo sozinho, quem termina é o próprio atleta pelo link, sem o Ed
+  // ter que digitar telefone/whatsapp/altura etc. na mão.
+  if (eraNovo && resp.data?.id){
+    toast('Atleta salvo! Copia o link aí embaixo e manda pra ele completar o cadastro dele (telefone, altura, contato do responsável...).', 'ok');
+    await abrirFicha(resp.data.id);
+  } else {
+    toast('Atleta salvo.', 'ok');
+    voltarParaLista();
+  }
 }
 
 // Exclusão real do cadastro. Duplas e rallies referenciam o atleta sem cascata
@@ -892,7 +907,8 @@ async function excluirAtleta(){
     if (resp.error.code === '23503'){ // foreign_key_violation
       const marcarInativo = confirm(
         `Não dá pra excluir ${nome}: já tem duplas ou pontos de jogo registrados no histórico dele.\n\n` +
-        `Quer marcar como Inativo em vez disso? Mantém o histórico e tira ele da lista de ativos.`
+        `Quer marcar como Inativo em vez disso? Mantém o histórico e tira ele da lista de ativos.\n\n` +
+        `(Cancelar aqui vai perguntar se você prefere apagar tudo mesmo assim, incluindo os jogos.)`
       );
       if (marcarInativo){
         const respInativo = await sb.from('atletas').update({ status: 'inativo' }).eq('id', state.fichaId);
@@ -900,7 +916,14 @@ async function excluirAtleta(){
         toast('Atleta marcado como inativo.', 'ok');
         await carregarAtletas();
         voltarParaLista();
+        return;
       }
+
+      const apagarTudo = confirm(
+        `Apagar ${nome} de vez, incluindo as duplas, os jogos e os pontos marcados no histórico dele?\n\n` +
+        `Atenção: como os jogos são de dupla, isso também apaga esse(s) jogo(s) pro parceiro (ou parceira) dele nas duplas em que jogaram juntos. Não pode ser desfeito.`
+      );
+      if (apagarTudo) await excluirAtletaComEstatisticas(state.fichaId, nome);
       return;
     }
 
@@ -909,6 +932,47 @@ async function excluirAtleta(){
   }
 
   toast('Atleta excluído.', 'ok');
+  await carregarAtletas();
+  voltarParaLista();
+}
+
+// Apaga o atleta "de vez" mesmo já tendo histórico: primeiro apaga as duplas
+// em que ele jogou (o "on delete cascade" do banco cuida de sumir com os
+// jogos/sets/pontos delas junto), e só depois o cadastro do atleta em si —
+// nessa hora o próprio banco cuida em cascata dos testes físicos, avaliações,
+// turmas etc. que já eram "on delete cascade" desde o início.
+async function excluirAtletaComEstatisticas(atletaId, nome){
+  const btn = document.getElementById('btn-excluir-ficha');
+  if (btn){ btn.disabled = true; btn.textContent = 'Excluindo…'; }
+
+  const [r1, r2] = await Promise.all([
+    sb.from('duplas').select('id').eq('atleta_1_id', atletaId),
+    sb.from('duplas').select('id').eq('atleta_2_id', atletaId),
+  ]);
+  if (r1.error || r2.error){
+    if (btn){ btn.disabled = false; btn.textContent = 'Excluir atleta'; }
+    toast('Erro ao localizar as duplas dele: ' + (r1.error || r2.error).message, 'err');
+    return;
+  }
+  const duplaIds = [...new Set([...(r1.data || []), ...(r2.data || [])].map(d => d.id))];
+
+  for (const duplaId of duplaIds){
+    const respDupla = await sb.from('duplas').delete().eq('id', duplaId);
+    if (respDupla.error){
+      if (btn){ btn.disabled = false; btn.textContent = 'Excluir atleta'; }
+      toast('Erro ao apagar uma das duplas dele: ' + respDupla.error.message, 'err');
+      return;
+    }
+  }
+
+  const respAtleta = await sb.from('atletas').delete().eq('id', atletaId);
+  if (respAtleta.error){
+    if (btn){ btn.disabled = false; btn.textContent = 'Excluir atleta'; }
+    toast('As duplas e os jogos foram apagados, mas não foi possível apagar o cadastro dele: ' + respAtleta.error.message, 'err');
+    return;
+  }
+
+  toast(`${nome} e todo o histórico de jogos dele foram apagados.`, 'ok');
   await carregarAtletas();
   voltarParaLista();
 }
@@ -1761,12 +1825,13 @@ async function abrirEvento(competicaoId){
   state.eventoAtual = { carregando: true };
   render();
 
-  const [{ data: competicao, error: e1 }, { data: duplas, error: e2 }, { data: jogos, error: e3 }] = await Promise.all([
+  const [{ data: competicao, error: e1 }, { data: duplas, error: e2 }, { data: jogos, error: e3 }, categoriasResp] = await Promise.all([
     sb.from('competicoes').select('*').eq('id', competicaoId).single(),
     sb.from('duplas').select('*, resultados_competicao(*)').eq('competicao_id', competicaoId),
     sb.from('jogos')
-      .select('*, duplas(atleta_1_id, atleta_2_id), adversarios(atleta_1_nome, atleta_2_nome)')
+      .select('*, duplas(id, atleta_1_id, atleta_2_id, parceiro_externo_nome, categoria_id), adversarios(atleta_1_nome, atleta_2_nome)')
       .eq('competicao_id', competicaoId).order('criado_em', { ascending: false }),
+    sb.from('competicao_categorias').select('categoria_id').eq('competicao_id', competicaoId),
   ]);
   if (e1 || e2 || e3){
     toast('Erro ao abrir o evento: ' + (e1 || e2 || e3).message, 'err');
@@ -1774,15 +1839,87 @@ async function abrirEvento(competicaoId){
     return;
   }
 
-  state.eventoAtual = { carregando: false, competicao, duplas: duplas || [], jogos: jogos || [] };
+  // Se a migração de categorias do evento ainda não rodou no Supabase, a
+  // tabela não existe — trata como "sem categorias marcadas" em vez de travar.
+  const categoriaIds = new Set((categoriasResp?.data || []).map(r => r.categoria_id));
+
+  state.eventoAtual = { carregando: false, competicao, duplas: duplas || [], jogos: jogos || [], categoriaIds };
   render();
+}
+
+// Evento em cascade (duplas/jogos/sets/rallies/resultados_competicao todos
+// têm "on delete cascade" até chegar em competicoes) — uma DELETE só resolve,
+// mas o aviso deixa claro tudo que some junto.
+async function excluirEvento(){
+  const ev = state.eventoAtual;
+  if (!ev || !ev.competicao) return;
+  const qtdJogos = ev.jogos?.length || 0;
+  const qtdDuplas = ev.duplas?.length || 0;
+  if (!confirm(
+    `Excluir o evento "${ev.competicao.nome}" definitivamente?\n\n` +
+    `Isso apaga também ${qtdDuplas} dupla(s) e ${qtdJogos} jogo(s) (com todos os sets e pontos marcados) registrados nele. Não pode ser desfeito.`
+  )) return;
+
+  const btn = document.getElementById('btn-excluir-evento');
+  if (btn){ btn.disabled = true; btn.textContent = 'Excluindo…'; }
+
+  const resp = await sb.from('competicoes').delete().eq('id', ev.competicao.id);
+  if (resp.error){
+    if (btn){ btn.disabled = false; btn.textContent = 'Excluir evento'; }
+    toast('Não foi possível excluir o evento: ' + resp.error.message, 'err');
+    return;
+  }
+
+  state.competicoes = state.competicoes.filter(c => c.id !== ev.competicao.id);
+  toast('Evento excluído.', 'ok');
+  voltarParaEventos();
+}
+
+// Jogo em cascade (sets/rallies somem junto) — pra corrigir um jogo criado
+// errado sem precisar mexer no evento inteiro.
+async function excluirJogo(jogoId, ev){
+  if (ev) ev.stopPropagation(); // o card do jogo tem onclick pra abrir o scout — não deixa isso disparar
+  const jogo = state.eventoAtual?.jogos?.find(j => j.id === jogoId);
+  const nomesAdv = jogo ? [jogo.adversarios?.atleta_1_nome, jogo.adversarios?.atleta_2_nome].filter(Boolean).join(' / ') : '';
+  if (!confirm(`Excluir este jogo${nomesAdv ? ' (vs ' + nomesAdv + ')' : ''} definitivamente?\n\nIsso apaga os sets e os pontos marcados dele. Não pode ser desfeito.`)) return;
+
+  const resp = await sb.from('jogos').delete().eq('id', jogoId);
+  if (resp.error){ toast('Não foi possível excluir o jogo: ' + resp.error.message, 'err'); return; }
+
+  if (state.eventoAtual) state.eventoAtual.jogos = state.eventoAtual.jogos.filter(j => j.id !== jogoId);
+  try { // evita reabrir do cache offline um jogo que acabou de ser excluído
+    const raw = localStorage.getItem('ft_scout_offline');
+    if (raw && JSON.parse(raw).jogoId === jogoId) localStorage.removeItem('ft_scout_offline');
+  } catch {}
+  toast('Jogo excluído.', 'ok');
+  render();
+}
+
+// Toggle otimista, igual ao de membro de turma: marca/desmarca na hora e só
+// depois confirma no banco.
+async function toggleCategoriaEvento(categoriaId){
+  const competicaoId = state.eventoAtualId;
+  const s = state.eventoAtual.categoriaIds;
+  const estava = s.has(categoriaId);
+  estava ? s.delete(categoriaId) : s.add(categoriaId);
+  render();
+
+  const resp = estava
+    ? await sb.from('competicao_categorias').delete().eq('competicao_id', competicaoId).eq('categoria_id', categoriaId)
+    : await sb.from('competicao_categorias').insert({ competicao_id: competicaoId, categoria_id: categoriaId });
+
+  if (resp.error){
+    toast('Não deu pra atualizar: ' + resp.error.message, 'err');
+    estava ? s.add(categoriaId) : s.delete(categoriaId);
+    render();
+  }
 }
 
 function abrirNovoEvento(){
   state.view = 'evento-novo';
   state.novoEvento = {
-    nome: '', nivel: 'estadual', data_inicio: new Date().toISOString().slice(0,10),
-    cidade: '', uf: '',
+    nome: '', nivel: 'estadual', data_inicio: new Date().toISOString().slice(0,10), data_fim: '',
+    cidade: '', uf: '', categoriaIds: new Set(),
   };
   render();
 }
@@ -1790,11 +1927,19 @@ function abrirNovoEvento(){
 function sincronizarNovoEventoDoDom(){
   const n = state.novoEvento;
   const g = (id) => document.getElementById(id);
-  if (g('ne-nome'))   n.nome = g('ne-nome').value;
-  if (g('ne-data'))   n.data_inicio = g('ne-data').value;
-  if (g('ne-nivel'))  n.nivel = g('ne-nivel').value;
-  if (g('ne-cidade')) n.cidade = g('ne-cidade').value;
-  if (g('ne-uf'))     n.uf = g('ne-uf').value;
+  if (g('ne-nome'))    n.nome = g('ne-nome').value;
+  if (g('ne-data'))    n.data_inicio = g('ne-data').value;
+  if (g('ne-data-fim')) n.data_fim = g('ne-data-fim').value;
+  if (g('ne-nivel'))   n.nivel = g('ne-nivel').value;
+  if (g('ne-cidade'))  n.cidade = g('ne-cidade').value;
+  if (g('ne-uf'))      n.uf = g('ne-uf').value;
+}
+
+function toggleCategoriaNovoEvento(categoriaId){
+  sincronizarNovoEventoDoDom();
+  const s = state.novoEvento.categoriaIds;
+  s.has(categoriaId) ? s.delete(categoriaId) : s.add(categoriaId);
+  render();
 }
 
 async function salvarNovoEvento(ev){
@@ -1804,16 +1949,55 @@ async function salvarNovoEvento(ev){
 
   if (!n.nome){ toast('Dá um nome pro evento.', 'err'); return; }
   if (!n.data_inicio){ toast('Preenche a data de início.', 'err'); return; }
+  if (n.data_fim && n.data_fim < n.data_inicio){ toast('A data de fim não pode ser antes da data de início.', 'err'); return; }
 
   const resp = await sb.from('competicoes').insert({
-    nome: n.nome, nivel: n.nivel, data_inicio: n.data_inicio,
+    nome: n.nome, nivel: n.nivel, data_inicio: n.data_inicio, data_fim: n.data_fim || null,
     cidade: n.cidade || null, uf: n.uf || null,
   }).select().single();
   if (resp.error){ toast('Erro ao criar o evento: ' + resp.error.message, 'err'); return; }
 
+  if (n.categoriaIds.size > 0){
+    const linhas = [...n.categoriaIds].map(categoria_id => ({ competicao_id: resp.data.id, categoria_id }));
+    const respCat = await sb.from('competicao_categorias').insert(linhas);
+    if (respCat.error){
+      toast('Evento criado, mas não deu pra salvar as categorias: ' + respCat.error.message + ' (rodou a migração no Supabase?)', 'err');
+    }
+  }
+
   state.competicoesCarregadas = false; // recarrega a lista na próxima vez que abrir
   toast('Evento criado.', 'ok');
   await abrirEvento(resp.data.id);
+}
+
+// Nome de exibição de uma dupla: nomes dos dois, usando o parceiro externo
+// (texto livre) quando não é atleta do nosso CT.
+function nomeDupla(d){
+  if (!d) return 'Dupla';
+  const a1 = state.atletas.find(a => a.id === d.atleta_1_id);
+  const nome2 = d.atleta_2_id
+    ? (state.atletas.find(a => a.id === d.atleta_2_id)?.apelido || state.atletas.find(a => a.id === d.atleta_2_id)?.nome)
+    : d.parceiro_externo_nome;
+  return [a1?.apelido || a1?.nome, nome2].filter(Boolean).join(' / ') || 'Dupla';
+}
+
+// Agrupa uma lista (duplas, jogos...) pela categoria da dupla, na ordem das
+// categorias cadastradas, com um grupo "Sem categoria" no fim pra quem não tem.
+function agruparPorCategoria(items, categoriaIdDoItem){
+  const porId = new Map();
+  items.forEach(item => {
+    const catId = categoriaIdDoItem(item);
+    if (!porId.has(catId)) porId.set(catId, []);
+    porId.get(catId).push(item);
+  });
+  const grupos = [...porId.entries()]
+    .map(([catId, itens]) => ({ categoria: state.categorias.find(c => c.id === catId) || null, itens }))
+    .sort((a, b) => {
+      if (!a.categoria) return 1;
+      if (!b.categoria) return -1;
+      return (a.categoria.ordem ?? 0) - (b.categoria.ordem ?? 0);
+    });
+  return grupos;
 }
 
 async function salvarClassificacao(duplaId){
@@ -1835,24 +2019,107 @@ async function salvarClassificacao(duplaId){
   render();
 }
 
+/* -------- nossas duplas (cadastradas ANTES do jogo, pra não ter que
+   procurar o atleta na hora de criar um jogo) -------- */
+
+function abrirNovaDupla(){
+  if (!state.eventoAtualId){ toast('Abra um evento primeiro.', 'err'); return; }
+  state.view = 'dupla-nova';
+  state.novaDupla = {
+    categoria_id: '', atleta_1_id: '', atleta_2_id: '',
+    parceiroExterno: false, parceiro_externo_nome: '',
+  };
+  render();
+}
+
+function voltarDaNovaDupla(){
+  state.view = 'evento-detalhe';
+  state.novaDupla = null;
+  render();
+}
+
+function sincronizarNovaDuplaDoDom(){
+  const n = state.novaDupla;
+  const g = (id) => document.getElementById(id);
+  if (g('nd-categoria'))         n.categoria_id = g('nd-categoria').value;
+  if (g('nd-atleta1'))           n.atleta_1_id = g('nd-atleta1').value;
+  if (g('nd-atleta2'))           n.atleta_2_id = g('nd-atleta2').value;
+  if (g('nd-parceiro-externo'))  n.parceiro_externo_nome = g('nd-parceiro-externo').value;
+}
+
+function toggleParceiroExterno(valor){
+  sincronizarNovaDuplaDoDom();
+  state.novaDupla.parceiroExterno = valor;
+  state.novaDupla.atleta_2_id = '';
+  state.novaDupla.parceiro_externo_nome = '';
+  render();
+}
+
+async function salvarNovaDupla(ev){
+  ev.preventDefault();
+  sincronizarNovaDuplaDoDom();
+  const n = state.novaDupla;
+  const competicaoId = state.eventoAtualId;
+
+  if (!n.atleta_1_id){ toast('Escolhe o nosso atleta.', 'err'); return; }
+  if (!n.parceiroExterno && !n.atleta_2_id){ toast('Escolhe o parceiro, ou marca "de fora do CT".', 'err'); return; }
+  if (!n.parceiroExterno && n.atleta_1_id === n.atleta_2_id){ toast('Escolhe dois atletas diferentes.', 'err'); return; }
+  if (n.parceiroExterno && !n.parceiro_externo_nome.trim()){ toast('Digita o nome do parceiro de fora.', 'err'); return; }
+
+  const dados = {
+    competicao_id: competicaoId,
+    atleta_1_id: n.atleta_1_id,
+    atleta_2_id: n.parceiroExterno ? null : n.atleta_2_id,
+    parceiro_externo_nome: n.parceiroExterno ? n.parceiro_externo_nome.trim() : null,
+    categoria_id: n.categoria_id ? Number(n.categoria_id) : null,
+  };
+
+  const resp = await sb.from('duplas').insert(dados).select('*, resultados_competicao(*)').single();
+  if (resp.error){
+    const msg = resp.error.code === '23502' || resp.error.code === '42703'
+      ? resp.error.message + ' (rodou a migração no Supabase antes de usar essa tela?)'
+      : resp.error.message;
+    toast('Erro ao registrar a dupla: ' + msg, 'err');
+    return;
+  }
+
+  state.eventoAtual.duplas.push(resp.data);
+  toast('Dupla registrada.', 'ok');
+  voltarDaNovaDupla();
+}
+
 /* -------- novo jogo -------- */
 
 function abrirNovoJogo(){
   if (!state.eventoAtualId){ toast('Abra um evento primeiro.', 'err'); return; }
+  if (!state.eventoAtual?.duplas?.length){
+    toast('Cadastra a dupla primeiro, aí é só escolher ela na hora do jogo.', 'err');
+    abrirNovaDupla();
+    return;
+  }
   state.view = 'jogo-novo';
   state.novoJogo = {
-    atleta_1_id: '', atleta_2_id: '',
+    dupla_id: state.eventoAtual.duplas.length === 1 ? state.eventoAtual.duplas[0].id : '',
     adv_1_nome: '', adv_2_nome: '', adv_equipe: '', adv_uf: '',
     fase: 'grupo', quadra: '', vento: '', sol: '',
+    sets_para_vencer: 2, pontos_set: 21, pontos_set_decisivo: 15,
   };
+  render();
+}
+
+// Formato do jogo varia MUITO por categoria: Sub-11 costuma jogar melhor de 1
+// até 15, adulto joga melhor de 3 até 21-21-15, e tem tudo que é variação no
+// meio (12, 18...). Por isso isso fica configurável por jogo, não fixo.
+function setSetsParaVencer(valor){
+  sincronizarNovoJogoDoDom();
+  state.novoJogo.sets_para_vencer = valor;
   render();
 }
 
 function sincronizarNovoJogoDoDom(){
   const n = state.novoJogo;
   const g = (id) => document.getElementById(id);
-  if (g('nj-atleta1'))    n.atleta_1_id = g('nj-atleta1').value;
-  if (g('nj-atleta2'))    n.atleta_2_id = g('nj-atleta2').value;
+  if (g('nj-dupla'))      n.dupla_id = g('nj-dupla').value;
   if (g('nj-adv1'))       n.adv_1_nome = g('nj-adv1').value;
   if (g('nj-adv2'))       n.adv_2_nome = g('nj-adv2').value;
   if (g('nj-adv-equipe')) n.adv_equipe = g('nj-adv-equipe').value;
@@ -1861,6 +2128,8 @@ function sincronizarNovoJogoDoDom(){
   if (g('nj-quadra'))     n.quadra = g('nj-quadra').value;
   if (g('nj-vento'))      n.vento = g('nj-vento').value;
   if (g('nj-sol'))        n.sol = g('nj-sol').value;
+  if (g('nj-pontos-set'))          n.pontos_set = g('nj-pontos-set').value;
+  if (g('nj-pontos-decisivo'))     n.pontos_set_decisivo = g('nj-pontos-decisivo').value;
 }
 
 async function salvarNovoJogo(ev){
@@ -1870,21 +2139,14 @@ async function salvarNovoJogo(ev){
   const competicaoId = state.eventoAtualId;
 
   if (!competicaoId){ toast('Abra um evento primeiro.', 'err'); return; }
-  if (!n.atleta_1_id || !n.atleta_2_id){ toast('Escolhe os dois atletas da dupla.', 'err'); return; }
-  if (n.atleta_1_id === n.atleta_2_id){ toast('Escolhe dois atletas diferentes.', 'err'); return; }
+  if (!n.dupla_id){ toast('Escolhe a nossa dupla.', 'err'); return; }
   if (!n.adv_1_nome){ toast('Preenche pelo menos o nome de um adversário.', 'err'); return; }
+  const pontosSet = Number(n.pontos_set);
+  const pontosDecisivo = Number(n.pontos_set_decisivo);
+  if (!pontosSet || pontosSet < 1){ toast('Pontos por set inválido.', 'err'); return; }
+  if (n.sets_para_vencer === 2 && (!pontosDecisivo || pontosDecisivo < 1)){ toast('Pontos do set decisivo inválido.', 'err'); return; }
 
-  const duplaExistente = await sb.from('duplas').select('id')
-    .eq('competicao_id', competicaoId).eq('atleta_1_id', n.atleta_1_id).eq('atleta_2_id', n.atleta_2_id)
-    .maybeSingle();
-  let duplaId = duplaExistente.data?.id;
-  if (!duplaId){
-    const resp = await sb.from('duplas')
-      .insert({ competicao_id: competicaoId, atleta_1_id: n.atleta_1_id, atleta_2_id: n.atleta_2_id })
-      .select().single();
-    if (resp.error){ toast('Erro ao registrar a dupla: ' + resp.error.message, 'err'); return; }
-    duplaId = resp.data.id;
-  }
+  const duplaId = n.dupla_id;
 
   const advResp = await sb.from('adversarios').insert({
     atleta_1_nome: n.adv_1_nome, atleta_2_nome: n.adv_2_nome || null,
@@ -1895,6 +2157,8 @@ async function salvarNovoJogo(ev){
   const jogoResp = await sb.from('jogos').insert({
     competicao_id: competicaoId, dupla_id: duplaId, adversario_id: advResp.data.id,
     fase: n.fase, quadra: n.quadra || null, vento: n.vento || null, sol: n.sol || null,
+    sets_para_vencer: n.sets_para_vencer, pontos_set: pontosSet,
+    pontos_set_decisivo: n.sets_para_vencer === 2 ? pontosDecisivo : pontosSet,
   }).select().single();
   if (jogoResp.error){ toast('Erro ao criar o jogo: ' + jogoResp.error.message, 'err'); return; }
 
@@ -1911,7 +2175,12 @@ function atletasDaDupla(ja){
   const d = ja.jogo.duplas;
   return [
     state.atletas.find(a => a.id === d.atleta_1_id) || { id: d.atleta_1_id, nome: '?' },
-    state.atletas.find(a => a.id === d.atleta_2_id) || { id: d.atleta_2_id, nome: '?' },
+    // dupla pode ter parceiro de fora do CT (sem cadastro de atleta) — nesse caso
+    // id fica null de propósito: os pontos dele entram no placar mas sem
+    // atribuição individual, porque não existe um atleta nosso pra apontar.
+    d.atleta_2_id
+      ? (state.atletas.find(a => a.id === d.atleta_2_id) || { id: d.atleta_2_id, nome: '?' })
+      : { id: null, nome: d.parceiro_externo_nome || 'Parceiro(a)', apelido: null, externo: true },
   ];
 }
 
@@ -1952,7 +2221,7 @@ async function abrirScout(jogoId){
   if (!state.subtipos) await carregarSubtipos();
 
   const [{ data: jogo, error: e1 }, { data: sets, error: e2 }] = await Promise.all([
-    sb.from('jogos').select('*, duplas(id, atleta_1_id, atleta_2_id), adversarios(*), competicoes(nome, nivel)').eq('id', jogoId).single(),
+    sb.from('jogos').select('*, duplas(id, atleta_1_id, atleta_2_id, parceiro_externo_nome), adversarios(*), competicoes(nome, nivel)').eq('id', jogoId).single(),
     sb.from('sets').select('*').eq('jogo_id', jogoId).order('numero'),
   ]);
   if (e1 || e2){
@@ -1969,7 +2238,7 @@ async function abrirScout(jogoId){
     carregando: false,
     jogo, sets, setAtualId: setAtual.id, rallies: rallies || [],
     passo: null, acaoEscolhida: null, salvando: false, avisoSet: null,
-    finalizado: jogo.sets_pro === 2 || jogo.sets_contra === 2,
+    finalizado: jogo.sets_pro === (jogo.sets_para_vencer || 2) || jogo.sets_contra === (jogo.sets_para_vencer || 2),
   };
   persistirJogoAtualOffline();
   render();
@@ -2071,7 +2340,12 @@ function registrarPonto(ladoVencedor, origem, atletaId, subtipoId, adversarioNum
 function checarFimDeSet(){
   const ja = state.jogoAtual;
   const setAtual = ja.sets.find(s => s.id === ja.setAtualId);
-  const limite = ja.sets.length === 3 ? 15 : 21;
+  const setsParaVencer = ja.jogo.sets_para_vencer || 2;
+  // "decisivo" só existe em jogo de melhor de 3 (sets_para_vencer=2): é o 3º set,
+  // o que desempata. Em melhor de 1 nunca tem decisivo — o único set já usa o
+  // limite normal de pontos.
+  const decisivo = setsParaVencer === 2 && ja.sets.length === 3;
+  const limite = decisivo ? (ja.jogo.pontos_set_decisivo || 15) : (ja.jogo.pontos_set || 21);
   const p = setAtual.pontos_pro, c = setAtual.pontos_contra;
   const acabou = (p >= limite || c >= limite) && Math.abs(p - c) >= 2;
   if (!acabou) return;
@@ -2081,7 +2355,7 @@ function checarFimDeSet(){
   ja.jogo.sets_contra += nosGanhamos ? 0 : 1;
   enfileirarOperacao('jogos', 'update', ja.jogo.id, { sets_pro: ja.jogo.sets_pro, sets_contra: ja.jogo.sets_contra });
 
-  if (ja.jogo.sets_pro === 2 || ja.jogo.sets_contra === 2){
+  if (ja.jogo.sets_pro === setsParaVencer || ja.jogo.sets_contra === setsParaVencer){
     ja.finalizado = true;
     ja.avisoSet = {
       tipo: 'jogo', numeroSetEncerrado: setAtual.numero, pontosPro: p, pontosContra: c,
@@ -2298,6 +2572,7 @@ function render(){
   if (state.view === 'eventos')         return renderEventos();
   if (state.view === 'evento-novo')     return renderNovoEvento();
   if (state.view === 'evento-detalhe')  return renderEventoDetalhe();
+  if (state.view === 'dupla-nova')      return renderNovaDupla();
   if (state.view === 'jogo-novo')       return renderNovoJogo();
   if (state.view === 'jogo-scout')      return renderScout();
   if (state.view === 'estatisticas')    return renderEstatisticas();
@@ -2474,7 +2749,7 @@ function renderDashboard(){
                 <span class="pill">${escapeHtml(c.nivel)}</span>
               </div>
               <div class="meta">
-                ${new Date(c.data_inicio+'T00:00:00').toLocaleDateString('pt-BR')}
+                ${new Date(c.data_inicio+'T00:00:00').toLocaleDateString('pt-BR')}${c.data_fim && c.data_fim !== c.data_inicio ? ' a ' + new Date(c.data_fim+'T00:00:00').toLocaleDateString('pt-BR') : ''}
                 ${c.cidade ? ' · ' + escapeHtml(c.cidade) + (c.uf ? '/' + escapeHtml(c.uf) : '') : ''}
               </div>
             </div>
@@ -2689,10 +2964,12 @@ function renderFicha(){
             <div class="row2">
               <div class="field"><label>Altura (cm)</label>
                 <input id="f-altura" type="number" step="0.1" value="${f.altura_cm ?? ''}"></div>
+              <div class="field"><label>Peso (kg)</label>
+                <input id="f-peso" type="number" step="0.1" value="${f.peso_kg ?? ''}"></div>
+            </div>
+            <div class="row3">
               <div class="field"><label>Envergadura (cm)</label>
                 <input id="f-envergadura" type="number" step="0.1" value="${f.envergadura_cm ?? ''}"></div>
-            </div>
-            <div class="row2">
               <div class="field"><label>Alcance de ataque (cm)</label>
                 <input id="f-alcance-at" type="number" step="0.1" value="${f.alcance_ataque_cm ?? ''}"></div>
               <div class="field"><label>Alcance de bloqueio (cm)</label>
@@ -2720,6 +2997,12 @@ function renderFicha(){
             <div class="row2">
               <div class="field"><label>Telefone</label>
                 <input id="f-telefone" value="${escapeHtml(f.telefone)}"></div>
+              <div class="field"><label>WhatsApp</label>
+                <input id="f-whatsapp" value="${escapeHtml(f.whatsapp)}"></div>
+            </div>
+            <div class="row2">
+              <div class="field"><label>Instagram</label>
+                <input id="f-instagram" placeholder="@perfil" value="${escapeHtml(f.instagram)}"></div>
               <div class="field"><label>E-mail</label>
                 <input id="f-email" type="email" value="${escapeHtml(f.email)}"></div>
             </div>
@@ -2757,8 +3040,9 @@ function renderFicha(){
           ${editando ? `
           <div class="section">
             <div class="section-title">Link do atleta</div>
-            <p class="muted" style="margin-top:-4px">Mande esse endereço uma vez pelo WhatsApp. É fixo — não muda, o atleta
-              abre todo dia pra responder antes e depois do treino, sem precisar de login.</p>
+            <p class="muted" style="margin-top:-4px">Mande esse endereço uma vez pelo WhatsApp. É fixo — não muda: o atleta
+              usa pra completar o próprio cadastro (telefone, WhatsApp, Instagram, data de nascimento, altura, peso,
+              contato do responsável) e também abre todo dia pra responder antes e depois do treino, sem precisar de login.</p>
             ${state.fichaToken === undefined ? `<p class="muted">Carregando…</p>` :
               state.fichaToken ? `
                 <div class="link-box">
@@ -3281,7 +3565,7 @@ function renderEventos(){
               <span class="pill">${escapeHtml(c.nivel)}</span>
             </div>
             <div class="meta">
-              ${new Date(c.data_inicio+'T00:00:00').toLocaleDateString('pt-BR')}
+              ${new Date(c.data_inicio+'T00:00:00').toLocaleDateString('pt-BR')}${c.data_fim && c.data_fim !== c.data_inicio ? ' a ' + new Date(c.data_fim+'T00:00:00').toLocaleDateString('pt-BR') : ''}
               ${c.cidade ? ' · ' + escapeHtml(c.cidade) + (c.uf ? '/' + escapeHtml(c.uf) : '') : ''}
             </div>
           </div>
@@ -3296,7 +3580,7 @@ function renderNovoEvento(){
     <div class="main">
       <button class="btn btn-ghost btn-sm" style="margin-bottom:14px" onclick="voltarParaEventos()">← Voltar</button>
       <h1>Novo evento</h1>
-      <p class="muted" style="margin-bottom:20px">Depois de criar, você adiciona os jogos e a classificação das nossas duplas.</p>
+      <p class="muted" style="margin-bottom:20px">Depois de criar, você adiciona as duplas, os jogos e a classificação.</p>
 
       <div class="card">
         <form onsubmit="salvarNovoEvento(event)">
@@ -3306,17 +3590,32 @@ function renderNovoEvento(){
           </div>
           <div class="row2">
             <div class="field"><label>Data de início *</label><input id="ne-data" type="date" value="${n.data_inicio}" required></div>
+            <div class="field"><label>Data de fim (se durar mais de um dia)</label><input id="ne-data-fim" type="date" value="${n.data_fim}"></div>
+          </div>
+          <div class="row2">
             <div class="field">
               <label>Nível</label>
               <select id="ne-nivel">
                 ${NIVEIS_COMPETICAO.map(([c,l]) => `<option value="${c}" ${n.nivel===c?'selected':''}>${l}</option>`).join('')}
               </select>
             </div>
-          </div>
-          <div class="row2">
             <div class="field"><label>Cidade</label><input id="ne-cidade" value="${escapeHtml(n.cidade)}"></div>
-            <div class="field"><label>UF</label><input id="ne-uf" maxlength="2" style="text-transform:uppercase" value="${escapeHtml(n.uf)}"></div>
           </div>
+          <div class="field" style="max-width:120px"><label>UF</label><input id="ne-uf" maxlength="2" style="text-transform:uppercase" value="${escapeHtml(n.uf)}"></div>
+
+          <div class="field">
+            <label>Categorias que vão disputar esse evento</label>
+            <p class="muted" style="margin-top:-2px;font-size:.8rem">Marca quais — depois, ao cadastrar cada dupla, você escolhe entre elas. Dá pra ajustar isso depois também.</p>
+            <div class="card" style="padding:10px 14px;max-height:260px;overflow-y:auto">
+              ${state.categorias.map(c => `
+                <label style="display:flex;align-items:center;gap:8px;padding:5px 0;cursor:pointer">
+                  <input type="checkbox" ${n.categoriaIds.has(c.id)?'checked':''} onchange="toggleCategoriaNovoEvento(${c.id})">
+                  ${escapeHtml(c.nome)} (${c.sexo})
+                </label>
+              `).join('')}
+            </div>
+          </div>
+
           <div class="ficha-actions">
             <button type="submit" class="btn btn-primary">Criar evento</button>
             <button type="button" class="btn btn-ghost" onclick="voltarParaEventos()">Cancelar</button>
@@ -3333,66 +3632,163 @@ function renderEventoDetalhe(){
     return;
   }
   const c = ev.competicao;
+  const categoriaIds = ev.categoriaIds || new Set();
+
+  const gruposDuplas = agruparPorCategoria(ev.duplas, d => d.categoria_id);
+  const gruposJogos = agruparPorCategoria(ev.jogos, j => j.duplas?.categoria_id ?? null);
+
+  const renderCardDupla = (d) => {
+    const r = d.resultados_competicao || {};
+    return `
+      <div class="card" style="margin-bottom:10px">
+        <div style="font-weight:700;margin-bottom:10px">${escapeHtml(nomeDupla(d))}${!d.atleta_2_id ? ' <span class="muted" style="font-weight:400;font-size:.78rem">(parceiro de fora do CT)</span>' : ''}</div>
+        <div class="row3">
+          <div class="field"><label>Colocação</label><input id="rc-colocacao-${d.id}" type="number" min="1" value="${r.colocacao ?? ''}"></div>
+          <div class="field"><label>Vitórias</label><input id="rc-vitorias-${d.id}" type="number" min="0" value="${r.vitorias ?? 0}"></div>
+          <div class="field"><label>Derrotas</label><input id="rc-derrotas-${d.id}" type="number" min="0" value="${r.derrotas ?? 0}"></div>
+        </div>
+        <div class="field"><label>Observações</label><textarea id="rc-obs-${d.id}">${escapeHtml(r.observacoes)}</textarea></div>
+        <button type="button" class="btn btn-sm" onclick="salvarClassificacao('${d.id}')">Salvar classificação</button>
+      </div>`;
+  };
+
+  const renderItemJogo = (j) => {
+    const nomesAdv = [j.adversarios?.atleta_1_nome, j.adversarios?.atleta_2_nome].filter(Boolean).join(' / ');
+    return `
+      <div class="list-item" onclick="abrirScout('${j.id}')" style="display:flex;align-items:center;gap:8px">
+        <div style="flex:1">
+          <div class="top">
+            <div class="titulo">${escapeHtml(nomeDupla(j.duplas))} × ${escapeHtml(nomesAdv || 'adversário')}</div>
+            <span class="pill">${j.sets_pro} × ${j.sets_contra}</span>
+          </div>
+          <div class="meta">
+            ${labelFase(j.fase)}
+            ${j.data_hora ? ' · ' + new Date(j.data_hora).toLocaleDateString('pt-BR') : ''}
+          </div>
+        </div>
+        <button type="button" class="btn btn-ghost btn-sm" style="color:var(--d)" onclick="excluirJogo('${j.id}', event)" title="Excluir jogo">Excluir</button>
+      </div>`;
+  };
 
   app.innerHTML = `
     ${renderTopbar()}
     <div class="main">
-      <button class="btn btn-ghost btn-sm" style="margin-bottom:14px" onclick="voltarParaEventos()">← Voltar</button>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <button class="btn btn-ghost btn-sm" onclick="voltarParaEventos()">← Voltar</button>
+        <button id="btn-excluir-evento" type="button" class="btn btn-ghost btn-sm" style="color:var(--d)" onclick="excluirEvento()">Excluir evento</button>
+      </div>
       <h1>${escapeHtml(c.nome)}</h1>
       <p class="muted" style="margin-bottom:20px">
-        ${escapeHtml(c.nivel)} · ${new Date(c.data_inicio+'T00:00:00').toLocaleDateString('pt-BR')}
+        ${escapeHtml(c.nivel)} · ${new Date(c.data_inicio+'T00:00:00').toLocaleDateString('pt-BR')}${c.data_fim && c.data_fim !== c.data_inicio ? ' a ' + new Date(c.data_fim+'T00:00:00').toLocaleDateString('pt-BR') : ''}
         ${c.cidade ? ' · ' + escapeHtml(c.cidade) + (c.uf ? '/' + escapeHtml(c.uf) : '') : ''}
       </p>
 
-      <div class="section-title">Classificação das nossas duplas</div>
-      ${ev.duplas.length === 0 ? `<div class="empty">Nenhuma dupla registrada neste evento ainda — cria um jogo abaixo que a dupla entra automaticamente.</div>` :
-        ev.duplas.map(d => {
-          const a1 = state.atletas.find(a => a.id === d.atleta_1_id);
-          const a2 = state.atletas.find(a => a.id === d.atleta_2_id);
-          const nomes = [a1?.apelido || a1?.nome, a2?.apelido || a2?.nome].filter(Boolean).join(' / ');
-          const r = d.resultados_competicao || {};
-          return `
-            <div class="card" style="margin-bottom:10px">
-              <div style="font-weight:700;margin-bottom:10px">${escapeHtml(nomes || 'Dupla')}</div>
-              <div class="row3">
-                <div class="field"><label>Colocação</label><input id="rc-colocacao-${d.id}" type="number" min="1" value="${r.colocacao ?? ''}"></div>
-                <div class="field"><label>Vitórias</label><input id="rc-vitorias-${d.id}" type="number" min="0" value="${r.vitorias ?? 0}"></div>
-                <div class="field"><label>Derrotas</label><input id="rc-derrotas-${d.id}" type="number" min="0" value="${r.derrotas ?? 0}"></div>
-              </div>
-              <div class="field"><label>Observações</label><textarea id="rc-obs-${d.id}">${escapeHtml(r.observacoes)}</textarea></div>
-              <button type="button" class="btn btn-sm" onclick="salvarClassificacao('${d.id}')">Salvar classificação</button>
-            </div>`;
-        }).join('')}
+      <div class="section-title">Categorias deste evento</div>
+      <div class="card" style="padding:10px 14px;margin-bottom:20px;max-height:220px;overflow-y:auto">
+        ${state.categorias.map(cat => `
+          <label style="display:flex;align-items:center;gap:8px;padding:5px 0;cursor:pointer">
+            <input type="checkbox" ${categoriaIds.has(cat.id)?'checked':''} onchange="toggleCategoriaEvento(${cat.id})">
+            ${escapeHtml(cat.nome)} (${cat.sexo})
+          </label>
+        `).join('')}
+      </div>
+
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+        <h2 style="flex:1;font-size:1.02rem;margin:0">Nossas duplas</h2>
+        <button class="btn btn-primary btn-sm" onclick="abrirNovaDupla()">+ Adicionar dupla</button>
+      </div>
+      ${ev.duplas.length === 0 ? `<div class="empty" style="margin-bottom:20px">Nenhuma dupla registrada ainda — adiciona aqui antes de criar o jogo, aí na hora é só escolher.</div>` :
+        gruposDuplas.map(g => `
+          <div style="margin-bottom:20px">
+            ${gruposDuplas.length > 1 ? `<div class="muted" style="font-weight:700;font-size:.82rem;margin-bottom:8px">${g.categoria ? escapeHtml(g.categoria.nome) + ' (' + g.categoria.sexo + ')' : 'Sem categoria definida'}</div>` : ''}
+            ${g.itens.map(renderCardDupla).join('')}
+          </div>
+        `).join('')}
 
       <div style="display:flex;align-items:center;gap:10px;margin:26px 0 16px">
         <h2 style="flex:1;font-size:1.02rem;margin:0">Jogos</h2>
         <button class="btn btn-primary btn-sm" onclick="abrirNovoJogo()">+ Novo jogo</button>
       </div>
       ${ev.jogos.length === 0 ? `<div class="empty">Nenhum jogo registrado neste evento ainda.</div>` :
-        ev.jogos.map(j => {
-          const a1 = state.atletas.find(a => a.id === j.duplas?.atleta_1_id);
-          const a2 = state.atletas.find(a => a.id === j.duplas?.atleta_2_id);
-          const nomesDupla = [a1?.apelido || a1?.nome, a2?.apelido || a2?.nome].filter(Boolean).join(' / ');
-          const nomesAdv = [j.adversarios?.atleta_1_nome, j.adversarios?.atleta_2_nome].filter(Boolean).join(' / ');
-          return `
-            <div class="list-item" onclick="abrirScout('${j.id}')">
-              <div class="top">
-                <div class="titulo">${escapeHtml(nomesDupla || 'Nossa dupla')} × ${escapeHtml(nomesAdv || 'adversário')}</div>
-                <span class="pill">${j.sets_pro} × ${j.sets_contra}</span>
-              </div>
-              <div class="meta">
-                ${labelFase(j.fase)}
-                ${j.data_hora ? ' · ' + new Date(j.data_hora).toLocaleDateString('pt-BR') : ''}
-              </div>
-            </div>`;
-        }).join('')}
+        gruposJogos.map(g => `
+          <div style="margin-bottom:20px">
+            ${gruposJogos.length > 1 ? `<div class="muted" style="font-weight:700;font-size:.82rem;margin-bottom:8px">${g.categoria ? escapeHtml(g.categoria.nome) + ' (' + g.categoria.sexo + ')' : 'Sem categoria definida'}</div>` : ''}
+            ${g.itens.map(renderItemJogo).join('')}
+          </div>
+        `).join('')}
+    </div>`;
+}
+
+function renderNovaDupla(){
+  const n = state.novaDupla;
+  const atletasAtivos = state.atletas.filter(a => a.status === 'ativo');
+  const nomeEvento = state.eventoAtual?.competicao?.nome || '';
+  const categoriaIds = state.eventoAtual?.categoriaIds || new Set();
+  const categoriasDoEvento = categoriaIds.size > 0
+    ? state.categorias.filter(c => categoriaIds.has(c.id))
+    : state.categorias; // nenhuma categoria marcada no evento ainda -> deixa escolher de qualquer uma
+
+  app.innerHTML = `
+    ${renderTopbar()}
+    <div class="main">
+      <button class="btn btn-ghost btn-sm" style="margin-bottom:14px" onclick="voltarDaNovaDupla()">← Voltar</button>
+      <h1>Nova dupla</h1>
+      <p class="muted" style="margin-bottom:20px">${nomeEvento ? escapeHtml(nomeEvento) + ' — ' : ''}Cadastra a dupla agora; na hora de criar o jogo é só escolher ela na lista.</p>
+
+      <div class="card">
+        <form onsubmit="salvarNovaDupla(event)">
+          <div class="field">
+            <label>Categoria</label>
+            <select id="nd-categoria">
+              <option value="">${categoriaIds.size > 0 ? 'Selecione…' : '— (marque as categorias do evento pra filtrar aqui)'}</option>
+              ${categoriasDoEvento.map(c => `<option value="${c.id}" ${String(n.categoria_id)===String(c.id)?'selected':''}>${escapeHtml(c.nome)} (${c.sexo})</option>`).join('')}
+            </select>
+          </div>
+
+          <div class="field">
+            <label>Nosso atleta *</label>
+            <select id="nd-atleta1">
+              <option value="">Selecione…</option>
+              ${atletasAtivos.map(a => `<option value="${a.id}" ${n.atleta_1_id===a.id?'selected':''}>${escapeHtml(a.nome)}</option>`).join('')}
+            </select>
+          </div>
+
+          <div class="field">
+            <label>Parceiro(a)</label>
+            <div class="seg">
+              <button type="button" class="${!n.parceiroExterno?'on':''}" onclick="toggleParceiroExterno(false)">Também é do nosso CT</button>
+              <button type="button" class="${n.parceiroExterno?'on':''}" onclick="toggleParceiroExterno(true)">De fora do CT</button>
+            </div>
+          </div>
+
+          ${n.parceiroExterno ? `
+            <div class="field">
+              <label>Nome do parceiro de fora *</label>
+              <input id="nd-parceiro-externo" value="${escapeHtml(n.parceiro_externo_nome)}" placeholder="ex: Fulano de outra equipe">
+            </div>
+          ` : `
+            <div class="field">
+              <label>Atleta parceiro(a) *</label>
+              <select id="nd-atleta2">
+                <option value="">Selecione…</option>
+                ${atletasAtivos.filter(a => a.id !== n.atleta_1_id).map(a => `<option value="${a.id}" ${n.atleta_2_id===a.id?'selected':''}>${escapeHtml(a.nome)}</option>`).join('')}
+              </select>
+            </div>
+          `}
+
+          <div class="ficha-actions">
+            <button type="submit" class="btn btn-primary">Registrar dupla</button>
+            <button type="button" class="btn btn-ghost" onclick="voltarDaNovaDupla()">Cancelar</button>
+          </div>
+        </form>
+      </div>
     </div>`;
 }
 
 function renderNovoJogo(){
   const n = state.novoJogo;
-  const atletasAtivos = state.atletas.filter(a => a.status === 'ativo');
   const nomeEvento = state.eventoAtual?.competicao?.nome || '';
+  const duplas = state.eventoAtual?.duplas || [];
 
   app.innerHTML = `
     ${renderTopbar()}
@@ -3404,22 +3800,38 @@ function renderNovoJogo(){
       <div class="card">
         <form onsubmit="salvarNovoJogo(event)">
           <div class="section-title">Nossa dupla</div>
-          <div class="row2">
-            <div class="field">
-              <label>Atleta 1 *</label>
-              <select id="nj-atleta1">
-                <option value="">Selecione…</option>
-                ${atletasAtivos.map(a => `<option value="${a.id}" ${n.atleta_1_id===a.id?'selected':''}>${escapeHtml(a.nome)}</option>`).join('')}
-              </select>
-            </div>
-            <div class="field">
-              <label>Atleta 2 *</label>
-              <select id="nj-atleta2">
-                <option value="">Selecione…</option>
-                ${atletasAtivos.map(a => `<option value="${a.id}" ${n.atleta_2_id===a.id?'selected':''}>${escapeHtml(a.nome)}</option>`).join('')}
-              </select>
+          <div class="field">
+            <label>Dupla *</label>
+            <select id="nj-dupla">
+              <option value="">Selecione…</option>
+              ${duplas.map(d => {
+                const cat = state.categorias.find(c => c.id === d.categoria_id);
+                return `<option value="${d.id}" ${n.dupla_id===d.id?'selected':''}>${escapeHtml(nomeDupla(d))}${cat ? ' — ' + escapeHtml(cat.nome) : ''}</option>`;
+              }).join('')}
+            </select>
+            <p class="muted" style="font-size:.8rem;margin-top:6px">Não achou a dupla? <a href="#" onclick="event.preventDefault();abrirNovaDupla()">Cadastra ela primeiro</a>.</p>
+          </div>
+
+          <div class="section-title" style="margin-top:20px">Formato do jogo</div>
+          <div class="field">
+            <label>Sets</label>
+            <div class="seg">
+              <button type="button" class="${n.sets_para_vencer===1?'on':''}" onclick="setSetsParaVencer(1)">Melhor de 1 set</button>
+              <button type="button" class="${n.sets_para_vencer===2?'on':''}" onclick="setSetsParaVencer(2)">Melhor de 3 sets</button>
             </div>
           </div>
+          <div class="row2">
+            <div class="field">
+              <label>Pontos por set *</label>
+              <input id="nj-pontos-set" type="number" min="1" value="${n.pontos_set}">
+            </div>
+            ${n.sets_para_vencer===2 ? `
+            <div class="field">
+              <label>Pontos no set decisivo (3º set) *</label>
+              <input id="nj-pontos-decisivo" type="number" min="1" value="${n.pontos_set_decisivo}">
+            </div>` : ''}
+          </div>
+          <p class="muted" style="font-size:.8rem;margin-top:-6px;margin-bottom:20px">Padrão: melhor de 3 sets, 21 pontos (15 no set decisivo). Ajuste aqui se o jogo for de 1 set só ou tiver outra pontuação (ex: 12, 15, 18...).</p>
 
           <div class="section-title" style="margin-top:20px">Adversário</div>
           <div class="row2">
@@ -3580,7 +3992,7 @@ function renderStatsAtleta(atletaId){
 
     <div class="section-title" style="margin-top:24px">Jogos (${jogos.length})</div>
     ${jogos.length === 0 ? `<div class="empty">Nenhum jogo registrado ainda.</div>` : jogos.map(j => {
-      const finalizado = j.sets_pro === 2 || j.sets_contra === 2;
+      const finalizado = j.sets_pro === (j.sets_para_vencer || 2) || j.sets_contra === (j.sets_para_vencer || 2);
       const venceu = j.sets_pro > j.sets_contra;
       return `
         <div class="list-item" style="cursor:default">
@@ -3601,8 +4013,9 @@ function renderStatsAtleta(atletaId){
 function renderResumoDesempenho(atletaId){
   const st = statsFundamento(atletaId);
   const jogos = jogosDoAtleta(atletaId);
-  const vitorias = jogos.filter(j => (j.sets_pro===2||j.sets_contra===2) && j.sets_pro > j.sets_contra).length;
-  const derrotas = jogos.filter(j => (j.sets_pro===2||j.sets_contra===2) && j.sets_contra > j.sets_pro).length;
+  const finalizadoJogo = j => j.sets_pro === (j.sets_para_vencer || 2) || j.sets_contra === (j.sets_para_vencer || 2);
+  const vitorias = jogos.filter(j => finalizadoJogo(j) && j.sets_pro > j.sets_contra).length;
+  const derrotas = jogos.filter(j => finalizadoJogo(j) && j.sets_contra > j.sets_pro).length;
   const semPontos = FUNDAMENTOS.every(f => st[f].ganhos + st[f].erros === 0);
 
   if (semPontos && jogos.length === 0){
@@ -3675,6 +4088,10 @@ function renderScout(){
       <div class="card" style="text-align:center;margin-bottom:16px">
         <div class="muted" style="margin-bottom:2px">Sets: ${ja.jogo.sets_pro} × ${ja.jogo.sets_contra} — Set ${setAtual.numero}</div>
         <div class="placar-set">${setAtual.pontos_pro} <span style="color:var(--tx3);font-size:1.6rem">×</span> ${setAtual.pontos_contra}</div>
+        <div class="muted" style="margin-top:4px;font-size:.78rem">
+          ${(ja.jogo.sets_para_vencer || 2) === 1 ? 'Melhor de 1 set' : 'Melhor de 3 sets'}
+          · vai até ${((ja.jogo.sets_para_vencer || 2) === 2 && ja.sets.length === 3) ? (ja.jogo.pontos_set_decisivo || 15) : (ja.jogo.pontos_set || 21)} pontos${((ja.jogo.sets_para_vencer || 2) === 2 && ja.sets.length === 3) ? ' (set decisivo)' : ''}
+        </div>
       </div>
 
       ${state.filaSync.length > 0 ? `
@@ -3716,9 +4133,9 @@ function renderScout(){
           <div class="scout-grid">
             ${ja.passo === 'nos' ? `
               ${[atleta1, atleta2].map(at => `
-                <button type="button" class="scout-btn" onclick="escolherAcao('nos','ataque','${at.id}')" ${ja.salvando?'disabled':''}>Ataque<br><span>${escapeHtml(at.apelido || at.nome)}</span></button>
-                <button type="button" class="scout-btn" onclick="escolherAcao('nos','saque','${at.id}')" ${ja.salvando?'disabled':''}>Saque<br><span>${escapeHtml(at.apelido || at.nome)}</span></button>
-                <button type="button" class="scout-btn" onclick="escolherAcao('nos','bloqueio','${at.id}')" ${ja.salvando?'disabled':''}>Bloqueio<br><span>${escapeHtml(at.apelido || at.nome)}</span></button>
+                <button type="button" class="scout-btn" onclick="escolherAcao('nos','ataque',${at.id?`'${at.id}'`:'null'})" ${ja.salvando?'disabled':''}>Ataque<br><span>${escapeHtml(at.apelido || at.nome)}</span></button>
+                <button type="button" class="scout-btn" onclick="escolherAcao('nos','saque',${at.id?`'${at.id}'`:'null'})" ${ja.salvando?'disabled':''}>Saque<br><span>${escapeHtml(at.apelido || at.nome)}</span></button>
+                <button type="button" class="scout-btn" onclick="escolherAcao('nos','bloqueio',${at.id?`'${at.id}'`:'null'})" ${ja.salvando?'disabled':''}>Bloqueio<br><span>${escapeHtml(at.apelido || at.nome)}</span></button>
               `).join('')}
               <button type="button" class="scout-btn" onclick="escolherAcao('nos','erro_adversario', null)" ${ja.salvando?'disabled':''}>Erro do<br><span>adversário</span></button>
               <button type="button" class="scout-btn" onclick="escolherAcao('nos','outro', null)" ${ja.salvando?'disabled':''}>Outro</button>
@@ -3729,7 +4146,7 @@ function renderScout(){
                 <button type="button" class="scout-btn" onclick="escolherAcao('eles','bloqueio', null, ${num})" ${ja.salvando?'disabled':''}>Bloqueio<br><span>${escapeHtml(nomeAdversario(ja, num))}</span></button>
               `).join('')}
               ${[atleta1, atleta2].map(at => `
-                <button type="button" class="scout-btn" onclick="escolherAcao('eles','erro_nosso','${at.id}')" ${ja.salvando?'disabled':''}>Erro nosso<br><span>${escapeHtml(at.apelido || at.nome)}</span></button>
+                <button type="button" class="scout-btn" onclick="escolherAcao('eles','erro_nosso',${at.id?`'${at.id}'`:'null'})" ${ja.salvando?'disabled':''}>Erro nosso<br><span>${escapeHtml(at.apelido || at.nome)}</span></button>
               `).join('')}
               <button type="button" class="scout-btn" onclick="escolherAcao('eles','outro', null)" ${ja.salvando?'disabled':''}>Outro</button>
             `}

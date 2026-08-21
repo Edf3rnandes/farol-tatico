@@ -165,6 +165,7 @@ let state = {
   erro: '',
   psr: { valor: null, horas_sono: '', dor: 0, dor_local: '', dor_lado: 'D', estresse: null, fadiga: null, enviando: false, enviado: false },
   pse: { valor: null, enviando: false, enviado: false },
+  cadastro: { data_nascimento: '', telefone: '', whatsapp: '', instagram: '', responsavel_nome: '', responsavel_telefone: '', altura_cm: '', peso_kg: '', enviando: false },
 };
 
 function escapeHtml(s){
@@ -209,8 +210,26 @@ async function carregar(){
 
   const info = Array.isArray(data) ? data[0] : data;
   state.info = info;
+  state.cadastro = {
+    data_nascimento: info.data_nascimento || '',
+    telefone: info.telefone || '',
+    whatsapp: info.whatsapp || '',
+    instagram: info.instagram || '',
+    responsavel_nome: info.responsavel_nome || '',
+    responsavel_telefone: info.responsavel_telefone || '',
+    altura_cm: info.altura_cm ?? '',
+    peso_kg: info.peso_kg ?? '',
+    enviando: false,
+  };
   state.fase = 'pronto';
   render();
+}
+
+// Cadastro "incompleto" = falta pelo menos um dos dados essenciais. Enquanto
+// isso, o card de completar cadastro vem aberto por padrão; depois que
+// tudo isso já foi preenchido uma vez, ele fica fechado (só "Meus dados").
+function cadastroIncompleto(info){
+  return !info.data_nascimento || !info.telefone || !info.altura_cm;
 }
 
 /* ---------------------------- PSR ---------------------------- */
@@ -226,17 +245,37 @@ function sincronizarPsrDoDom(){
   if (local) state.psr.dor_local = local.value;
 }
 
-function setPsrValor(v){ sincronizarPsrDoDom(); state.psr.valor = v; render(); }
-function setPsrDor(v){ sincronizarPsrDoDom(); state.psr.dor = v; render(); }
-function setPsrEstresse(v){ sincronizarPsrDoDom(); state.psr.estresse = v; render(); }
-function setPsrFadiga(v){ sincronizarPsrDoDom(); state.psr.fadiga = v; render(); }
-function setPsrLado(v){ sincronizarPsrDoDom(); state.psr.dor_lado = v; render(); }
+// A página inteira é reconstruída a cada clique em qualquer escala (PSR, PSE
+// ou toggle do card de cadastro) — se não salvar o que já foi digitado nos
+// OUTROS formulários antes de reconstruir, um toque na escala de PSR
+// apagaria o que a pessoa já tinha digitado no cadastro (telefone, altura…)
+// e vice-versa. Por isso todo clique sincroniza os três de uma vez.
+function sincronizarCadastroDoDom(){
+  const c = state.cadastro;
+  const g = (id) => document.getElementById(id);
+  if (g('c-nasc'))      c.data_nascimento = g('c-nasc').value;
+  if (g('c-tel'))       c.telefone = g('c-tel').value;
+  if (g('c-whats'))     c.whatsapp = g('c-whats').value;
+  if (g('c-insta'))     c.instagram = g('c-insta').value;
+  if (g('c-altura'))    c.altura_cm = g('c-altura').value;
+  if (g('c-peso'))      c.peso_kg = g('c-peso').value;
+  if (g('c-resp-nome')) c.responsavel_nome = g('c-resp-nome').value;
+  if (g('c-resp-tel'))  c.responsavel_telefone = g('c-resp-tel').value;
+}
+function sincronizarFormularios(){ sincronizarPsrDoDom(); sincronizarCadastroDoDom(); }
+
+function setPsrValor(v){ sincronizarFormularios(); state.psr.valor = v; render(); }
+function setPsrDor(v){ sincronizarFormularios(); state.psr.dor = v; render(); }
+function setPsrEstresse(v){ sincronizarFormularios(); state.psr.estresse = v; render(); }
+function setPsrFadiga(v){ sincronizarFormularios(); state.psr.fadiga = v; render(); }
+function setPsrLado(v){ sincronizarFormularios(); state.psr.dor_lado = v; render(); }
 
 async function enviarPsr(ev){
   ev.preventDefault();
   const p = state.psr;
   if (p.valor === null){ toast('Toca em um número para o PSR antes de enviar.'); return; }
 
+  sincronizarCadastroDoDom(); // preserva o que já foi digitado no card de cadastro
   p.enviando = true; render();
 
   const horasSono = document.getElementById('p-sono')?.value || null;
@@ -269,13 +308,14 @@ async function enviarPsr(ev){
 
 /* ---------------------------- PSE ---------------------------- */
 
-function setPseValor(v){ state.pse.valor = v; render(); }
+function setPseValor(v){ sincronizarFormularios(); state.pse.valor = v; render(); }
 
 async function enviarPse(ev){
   ev.preventDefault();
   const p = state.pse;
   if (p.valor === null){ toast('Toca em um número para o PSE antes de enviar.'); return; }
 
+  sincronizarCadastroDoDom(); // preserva o que já foi digitado no card de cadastro
   p.enviando = true; render();
 
   const { error } = await sb.rpc('responder_pse', {
@@ -294,6 +334,52 @@ async function enviarPse(ev){
 
   p.enviado = true;
   state.info.pse_sessao_id = null;
+  render();
+}
+
+/* ---------------------------- cadastro ---------------------------- */
+
+async function enviarCadastro(ev){
+  ev.preventDefault();
+  sincronizarFormularios();
+  const c = state.cadastro;
+
+  c.enviando = true; render();
+
+  const { error } = await sb.rpc('completar_cadastro_atleta', {
+    p_token: TOKEN,
+    p_data_nascimento: c.data_nascimento || null,
+    p_telefone: c.telefone || null,
+    p_whatsapp: c.whatsapp || null,
+    p_instagram: c.instagram || null,
+    p_responsavel_nome: c.responsavel_nome || null,
+    p_responsavel_telefone: c.responsavel_telefone || null,
+    p_altura_cm: c.altura_cm !== '' ? Number(c.altura_cm) : null,
+    p_peso_kg: c.peso_kg !== '' ? Number(c.peso_kg) : null,
+  });
+
+  c.enviando = false;
+
+  if (error){
+    toast('Não consegui salvar: ' + error.message);
+    render();
+    return;
+  }
+
+  // Atualiza o que a página já sabe localmente (sem precisar buscar de novo)
+  // pra sumir com o aviso de "cadastro incompleto" na hora, se já deu.
+  Object.assign(state.info, {
+    data_nascimento: c.data_nascimento || state.info.data_nascimento,
+    telefone: c.telefone || state.info.telefone,
+    whatsapp: c.whatsapp || state.info.whatsapp,
+    instagram: c.instagram || state.info.instagram,
+    responsavel_nome: c.responsavel_nome || state.info.responsavel_nome,
+    responsavel_telefone: c.responsavel_telefone || state.info.responsavel_telefone,
+    altura_cm: c.altura_cm !== '' ? Number(c.altura_cm) : state.info.altura_cm,
+    peso_kg: c.peso_kg !== '' ? Number(c.peso_kg) : state.info.peso_kg,
+  });
+
+  toast('Dados salvos. Valeu!');
   render();
 }
 
@@ -358,6 +444,8 @@ function renderPronto(){
       <h1>Oi, ${escapeHtml(nome)}!</h1>
       <p class="muted" style="margin-bottom:22px">${new Date().toLocaleDateString('pt-BR', { weekday:'long', day:'numeric', month:'long' })}</p>
 
+      ${renderCardCadastro()}
+
       ${info.psr_pendente ? renderCardPsr() : (state.psr.enviado ? renderConfirmadoPsr() : '')}
       ${info.pse_sessao_id ? renderCardPse() : (state.pse.enviado ? renderConfirmadoPse() : '')}
 
@@ -368,6 +456,55 @@ function renderPronto(){
         </div>
       ` : ''}
     </div>`;
+}
+
+function renderCardCadastro(){
+  const c = state.cadastro;
+  const incompleto = cadastroIncompleto(state.info);
+
+  return `
+    <details class="card" ${incompleto ? 'open' : ''}>
+      <summary style="cursor:pointer;font-weight:700;font-size:1.02rem">
+        ${incompleto ? 'Complete seu cadastro' : 'Meus dados'}
+      </summary>
+      <p class="desc" style="margin-top:8px">
+        ${incompleto
+          ? 'Preenche o que faltar aqui — assim a comissão não precisa ficar te pedindo um por um.'
+          : 'Pode atualizar aqui sempre que precisar.'}
+      </p>
+
+      <form onsubmit="enviarCadastro(event)">
+        <div class="field">
+          <label>Data de nascimento</label>
+          <input id="c-nasc" type="date" value="${escapeHtml(c.data_nascimento)}">
+        </div>
+        <div class="row2">
+          <div class="field"><label>Altura (cm)</label>
+            <input id="c-altura" type="number" step="0.1" min="0" inputmode="decimal" value="${escapeHtml(c.altura_cm)}"></div>
+          <div class="field"><label>Peso (kg)</label>
+            <input id="c-peso" type="number" step="0.1" min="0" inputmode="decimal" value="${escapeHtml(c.peso_kg)}"></div>
+        </div>
+        <div class="row2">
+          <div class="field"><label>Telefone</label>
+            <input id="c-tel" type="tel" placeholder="(xx) xxxxx-xxxx" value="${escapeHtml(c.telefone)}"></div>
+          <div class="field"><label>WhatsApp</label>
+            <input id="c-whats" type="tel" placeholder="(xx) xxxxx-xxxx" value="${escapeHtml(c.whatsapp)}"></div>
+        </div>
+        <div class="field">
+          <label>Instagram</label>
+          <input id="c-insta" placeholder="@seu.perfil" value="${escapeHtml(c.instagram)}">
+        </div>
+        <div class="field">
+          <label>Nome do responsável (se for de menor)</label>
+          <input id="c-resp-nome" value="${escapeHtml(c.responsavel_nome)}">
+        </div>
+        <div class="field">
+          <label>Telefone do responsável</label>
+          <input id="c-resp-tel" type="tel" placeholder="(xx) xxxxx-xxxx" value="${escapeHtml(c.responsavel_telefone)}">
+        </div>
+        <button class="btn btn-primary" ${c.enviando ? 'disabled' : ''}>${c.enviando ? 'Salvando…' : 'Salvar meus dados'}</button>
+      </form>
+    </details>`;
 }
 
 function renderConfirmadoPsr(){
