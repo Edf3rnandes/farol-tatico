@@ -165,7 +165,7 @@ let state = {
   erro: '',
   psr: { valor: null, horas_sono: '', dor: 0, dor_local: '', dor_lado: 'D', estresse: null, fadiga: null, enviando: false, enviado: false },
   pse: { valor: null, enviando: false, enviado: false },
-  cadastro: { data_nascimento: '', telefone: '', whatsapp: '', instagram: '', responsavel_nome: '', responsavel_telefone: '', altura_cm: '', peso_kg: '', enviando: false },
+  cadastro: { data_nascimento: '', telefone: '', instagram: '', responsavel_nome: '', responsavel_telefone: '', altura_cm: '', peso_kg: '', enviando: false },
 };
 
 function escapeHtml(s){
@@ -213,7 +213,6 @@ async function carregar(){
   state.cadastro = {
     data_nascimento: info.data_nascimento || '',
     telefone: info.telefone || '',
-    whatsapp: info.whatsapp || '',
     instagram: info.instagram || '',
     responsavel_nome: info.responsavel_nome || '',
     responsavel_telefone: info.responsavel_telefone || '',
@@ -255,7 +254,6 @@ function sincronizarCadastroDoDom(){
   const g = (id) => document.getElementById(id);
   if (g('c-nasc'))      c.data_nascimento = g('c-nasc').value;
   if (g('c-tel'))       c.telefone = g('c-tel').value;
-  if (g('c-whats'))     c.whatsapp = g('c-whats').value;
   if (g('c-insta'))     c.instagram = g('c-insta').value;
   if (g('c-altura'))    c.altura_cm = g('c-altura').value;
   if (g('c-peso'))      c.peso_kg = g('c-peso').value;
@@ -350,7 +348,6 @@ async function enviarCadastro(ev){
     p_token: TOKEN,
     p_data_nascimento: c.data_nascimento || null,
     p_telefone: c.telefone || null,
-    p_whatsapp: c.whatsapp || null,
     p_instagram: c.instagram || null,
     p_responsavel_nome: c.responsavel_nome || null,
     p_responsavel_telefone: c.responsavel_telefone || null,
@@ -371,7 +368,6 @@ async function enviarCadastro(ev){
   Object.assign(state.info, {
     data_nascimento: c.data_nascimento || state.info.data_nascimento,
     telefone: c.telefone || state.info.telefone,
-    whatsapp: c.whatsapp || state.info.whatsapp,
     instagram: c.instagram || state.info.instagram,
     responsavel_nome: c.responsavel_nome || state.info.responsavel_nome,
     responsavel_telefone: c.responsavel_telefone || state.info.responsavel_telefone,
@@ -485,14 +481,10 @@ function renderCardCadastro(){
             <input id="c-peso" type="number" step="0.1" min="0" inputmode="decimal" value="${escapeHtml(c.peso_kg)}"></div>
         </div>
         <div class="row2">
-          <div class="field"><label>Telefone</label>
+          <div class="field"><label>Telefone / WhatsApp</label>
             <input id="c-tel" type="tel" placeholder="(xx) xxxxx-xxxx" value="${escapeHtml(c.telefone)}"></div>
-          <div class="field"><label>WhatsApp</label>
-            <input id="c-whats" type="tel" placeholder="(xx) xxxxx-xxxx" value="${escapeHtml(c.whatsapp)}"></div>
-        </div>
-        <div class="field">
-          <label>Instagram</label>
-          <input id="c-insta" placeholder="@seu.perfil" value="${escapeHtml(c.instagram)}">
+          <div class="field"><label>Instagram</label>
+            <input id="c-insta" placeholder="@seu.perfil" value="${escapeHtml(c.instagram)}"></div>
         </div>
         <div class="field">
           <label>Nome do responsável (se for de menor)</label>

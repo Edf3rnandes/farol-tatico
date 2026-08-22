@@ -218,6 +218,7 @@ let state = {
   categorias: [],
   atletas: [],
   filtro: { busca: '', categoria: '', status: 'ativo', turma: '' },
+  dashboardAniversariantesAberto: false, // painel de aniversariantes do Início vem fechado por padrão
   fichaId: null,        // null = criando; senão, id do atleta em edição
   fichaOriginal: null,
   fichaToken: undefined, // link do atleta: undefined = não buscou ainda, null = não tem, string = token
@@ -239,6 +240,7 @@ let state = {
   sessoesCarregadas: false,
   sessoes: [],
   sessaoEdit: null,         // form de nova sessão
+  sessaoGerar: null,        // form de geração de sessões pré-agendadas (a partir dos dias fixos da turma)
   sessaoAtual: null,        // sessão aberta (detalhe), com presenças carregadas
 
   // testes físicos
@@ -265,6 +267,8 @@ let state = {
   estatisticasCarregadas: false,
   estatisticas: { rallies: [], jogos: [] },
   statsAtletaId: '',        // '' = comparação entre todos; senão, id do atleta selecionado
+  statsFiltroAtletaIds: new Set(), // vazio = compara todo mundo; senão, só os marcados aqui
+  statsFiltroAberto: false,
 
   // sincronização do scout offline
   filaSync: [],             // operações pendentes de gravar no Supabase, carregado do localStorage
@@ -348,6 +352,26 @@ function aniversariantesProximos(dias = 30){
     .sort((a, b) => a.diffDias - b.diffDias);
 }
 
+// Aniversariantes do MÊS atual (em vez de "próximos N dias"), ordenados pelo
+// dia do mês — inclui quem já fez aniversário este mês, não só quem ainda
+// vai fazer, pra bater com "quem faz aniversário em [mês]" no calendário.
+function aniversariantesDoMes(){
+  const hoje = new Date();
+  const mesAtual = hoje.getMonth();
+  const anoAtual = hoje.getFullYear();
+
+  return state.atletas
+    .filter(a => a.data_nascimento)
+    .map(a => {
+      const nasc = new Date(a.data_nascimento + 'T00:00:00');
+      const dataEsteAno = new Date(anoAtual, nasc.getMonth(), nasc.getDate());
+      const idadeQueFaz = anoAtual - nasc.getFullYear();
+      return { atleta: a, proxima: dataEsteAno, idadeQueFaz, dia: nasc.getDate() };
+    })
+    .filter(x => x.proxima.getMonth() === mesAtual)
+    .sort((a, b) => a.dia - b.dia);
+}
+
 function descricaoDiasRestantes(diffDias){
   if (diffDias === 0) return 'hoje';
   if (diffDias === 1) return 'amanhã';
@@ -372,9 +396,28 @@ function proximasSessoes(limite = 5){
 
 // Atalhos rápidos a partir do dashboard: além de abrir a tela, ajustam a aba
 // ativa pra navegação/voltar continuarem consistentes.
-function novoAtletaDoDashboard(){ state.aba = 'atletas'; abrirNovaFicha(); }
-function novaSessaoDoDashboard(){ state.aba = 'treinos'; abrirNovaSessao(); }
-function novoEventoDoDashboard(){ state.aba = 'jogos'; abrirNovoEvento(); }
+function novoAtletaDoDashboard(){ marcarAba('atletas'); abrirNovaFicha(); }
+function novaSessaoDoDashboard(){ marcarAba('treinos'); abrirNovaSessao(); }
+function novoEventoDoDashboard(){ marcarAba('jogos'); abrirNovoEvento(); }
+
+// Os cards de "X ativos" só mostravam o número — pra ver QUEM são, tinha que
+// sair procurando na aba de Atletas/Treinos na mão. Clicar no card já leva
+// direto pra lista certa, filtrada.
+function verAtletasAtivosDoDashboard(){
+  marcarAba('atletas');
+  state.filtro = { busca: '', categoria: '', status: 'ativo', turma: '' };
+  state.view = 'lista';
+  render();
+}
+function verTurmasAtivasDoDashboard(){
+  marcarAba('treinos');
+  mostrarTurmas();
+}
+
+function toggleAniversariantesDashboard(){
+  state.dashboardAniversariantesAberto = !state.dashboardAniversariantesAberto;
+  render();
+}
 
 function iniciais(nome){
   if (!nome) return '?';
@@ -538,8 +581,23 @@ async function boot(){
     carregarCategorias(), carregarAtletas(), carregarTurmas(), carregarTurmaAtletasMap(),
     carregarCompeticoes(), carregarSessoes(),
   ]);
-  state.aba = 'inicio';
-  state.view = 'dashboard';
+
+  // Sempre que o navegador recarrega a página (trocar de app no celular, PWA
+  // reiniciada em segundo plano etc.) o estado da tela se perde — sem isto,
+  // a pessoa sempre volta pro Início mesmo saindo de outra aba. Guarda a
+  // última aba usada e volta direto pra ela.
+  const VIEW_PADRAO_DA_ABA = { inicio: 'dashboard', atletas: 'lista', jogos: 'eventos', estatisticas: 'estatisticas', treinos: 'sessoes' };
+  let ultimaAba = 'inicio';
+  try { ultimaAba = localStorage.getItem('ft_ultima_aba') || 'inicio'; } catch {}
+  if (!VIEW_PADRAO_DA_ABA[ultimaAba]) ultimaAba = 'inicio';
+
+  state.aba = ultimaAba;
+  state.view = VIEW_PADRAO_DA_ABA[ultimaAba];
+  render();
+
+  if (ultimaAba === 'jogos' && !state.competicoesCarregadas) await carregarCompeticoes();
+  if (ultimaAba === 'estatisticas' && !state.estatisticasCarregadas) await carregarEstatisticas();
+  if (ultimaAba === 'treinos' && !state.turmasCarregadas) await carregarTurmas();
   render();
 }
 
@@ -622,8 +680,16 @@ function formatarDataBr(dataIso){
 
 /* ---------------------------- navegação entre abas ---------------------------- */
 
-async function irParaAba(aba){
+// Grava qual aba está ativa também fora do irParaAba (atalhos do dashboard,
+// abrir uma sessão/evento específico etc.) — sem isto a página recarregada
+// (trocar de app no celular, por exemplo) esqueceria de onde a pessoa estava.
+function marcarAba(aba){
   state.aba = aba;
+  try { localStorage.setItem('ft_ultima_aba', aba); } catch {}
+}
+
+async function irParaAba(aba){
+  marcarAba(aba);
   if (aba === 'inicio'){
     state.view = 'dashboard';
     render();
@@ -727,7 +793,7 @@ async function reverificarAcesso(){
 const CAMPOS_VAZIOS = {
   nome: '', apelido: '', sexo: '', categoria_id: '', data_nascimento: '',
   altura_cm: '', peso_kg: '', envergadura_cm: '', alcance_ataque_cm: '', alcance_bloqueio_cm: '',
-  mao_dominante: '', lado_preferencial: '', telefone: '', whatsapp: '', instagram: '', email: '',
+  mao_dominante: '', lado_preferencial: '', telefone: '', instagram: '', email: '',
   responsavel_nome: '', responsavel_telefone: '', status: 'ativo', observacoes: ''
 };
 
@@ -804,7 +870,6 @@ function lerFormFicha(){
     mao_dominante: g('f-mao') || null,
     lado_preferencial: g('f-lado') || null,
     telefone: g('f-telefone') || null,
-    whatsapp: g('f-whatsapp') || null,
     instagram: g('f-instagram') || null,
     email: g('f-email') || null,
     responsavel_nome: g('f-resp-nome') || null,
@@ -826,7 +891,7 @@ function sincronizarFichaDoDom(){
     categoria_id: 'f-categoria', altura_cm: 'f-altura', peso_kg: 'f-peso', envergadura_cm: 'f-envergadura',
     alcance_ataque_cm: 'f-alcance-at', alcance_bloqueio_cm: 'f-alcance-bl',
     mao_dominante: 'f-mao', lado_preferencial: 'f-lado', telefone: 'f-telefone',
-    whatsapp: 'f-whatsapp', instagram: 'f-instagram',
+    instagram: 'f-instagram',
     email: 'f-email', responsavel_nome: 'f-resp-nome', responsavel_telefone: 'f-resp-tel',
     observacoes: 'f-obs',
   };
@@ -877,7 +942,7 @@ async function salvarFicha(ev){
 
   // Atleta novo: reabre a ficha dele já mostrando o link — não faz o cadastro
   // completo sozinho, quem termina é o próprio atleta pelo link, sem o Ed
-  // ter que digitar telefone/whatsapp/altura etc. na mão.
+  // ter que digitar telefone/altura etc. na mão.
   if (eraNovo && resp.data?.id){
     toast('Atleta salvo! Copia o link aí embaixo e manda pra ele completar o cadastro dele (telefone, altura, contato do responsável...).', 'ok');
     await abrirFicha(resp.data.id);
@@ -1267,6 +1332,7 @@ async function abrirTurma(id){
     horario_fim: t.horario_fim || '', local: t.local || '', ativo: t.ativo,
   };
   state.buscaMembroTurma = '';
+  state.turmaAdicionarAberto = false; // por padrão mostra só quem já é membro, não a lista inteira
   state.view = 'turma-edit';
   render();
 
@@ -1308,6 +1374,21 @@ function atualizarBuscaMembro(valor){
   render();
 }
 
+// Por padrão a tela só mostra quem já é da turma — pra achar alguém em meio
+// aos 56 atletas cadastrados é ruim. "Adicionar atletas" abre a busca com a
+// lista inteira (com checkbox) só quando realmente precisa incluir gente nova.
+function abrirAdicionarMembrosTurma(){
+  sincronizarTurmaDoDom();
+  state.turmaAdicionarAberto = true;
+  render();
+}
+function fecharAdicionarMembrosTurma(){
+  sincronizarTurmaDoDom();
+  state.turmaAdicionarAberto = false;
+  state.buscaMembroTurma = '';
+  render();
+}
+
 async function salvarTurma(ev){
   ev.preventDefault();
   const t = state.turmaEdit;
@@ -1339,7 +1420,9 @@ async function salvarTurma(ev){
     // turma nova: agora que ela existe, reabre já em modo edição pra liberar a lista de membros
     await abrirTurma(resp.data.id);
   } else {
-    render();
+    // turma existente: os membros já foram salvos na hora (clique a clique),
+    // então salvar aqui só confirma nome/horário — pode voltar pra lista.
+    voltarParaTurmas();
   }
 }
 
@@ -1394,7 +1477,103 @@ function voltarParaSessoes(){
   state.view = 'sessoes';
   state.sessaoEdit = null;
   state.sessaoAtual = null;
+  state.sessaoGerar = null;
   render();
+}
+
+/* ---- sessões pré-agendadas: gera várias sessões de uma vez, nos dias
+   fixos e horário já cadastrados na turma, em vez de criar uma por vez ---- */
+
+const CODIGO_DIA_JS = { dom: 0, seg: 1, ter: 2, qua: 3, qui: 4, sex: 5, sab: 6 };
+
+function abrirGerarSessoes(){
+  marcarAba('treinos');
+  const hoje = new Date().toISOString().slice(0,10);
+  const turmasComDias = state.turmas.filter(t => t.ativo && (t.dias_semana || []).length > 0);
+  state.sessaoGerar = {
+    turma_id: turmasComDias[0]?.id || '',
+    data_inicio: hoje,
+    semanas: 4,
+    tipo: 'tecnico',
+  };
+  state.view = 'sessao-gerar';
+  render();
+}
+
+function sincronizarGerarSessoesDoDom(){
+  const f = state.sessaoGerar;
+  const g = (id) => document.getElementById(id);
+  if (g('sg-turma'))   f.turma_id = g('sg-turma').value;
+  if (g('sg-data'))    f.data_inicio = g('sg-data').value;
+  if (g('sg-semanas')) f.semanas = g('sg-semanas').value;
+}
+
+function atualizarGerarSessoes(){
+  sincronizarGerarSessoesDoDom();
+  render();
+}
+
+function setTipoGerarSessoes(tipo){
+  sincronizarGerarSessoesDoDom();
+  state.sessaoGerar.tipo = tipo;
+  render();
+}
+
+function datasParaGerar(){
+  const f = state.sessaoGerar;
+  const turma = state.turmas.find(t => t.id === f.turma_id);
+  if (!turma || !(turma.dias_semana || []).length || !f.data_inicio) return [];
+  const diasAlvo = new Set(turma.dias_semana.map(d => CODIGO_DIA_JS[d]));
+  const semanas = Number(f.semanas) || 0;
+  const totalDias = semanas * 7;
+  const inicio = new Date(f.data_inicio + 'T00:00:00');
+  const datas = [];
+  for (let i = 0; i < totalDias; i++){
+    const d = new Date(inicio);
+    d.setDate(d.getDate() + i);
+    if (diasAlvo.has(d.getDay())) datas.push(d.toISOString().slice(0,10));
+  }
+  return datas;
+}
+
+async function salvarSessoesGeradas(ev){
+  ev.preventDefault();
+  sincronizarGerarSessoesDoDom();
+  const f = state.sessaoGerar;
+  const turma = state.turmas.find(t => t.id === f.turma_id);
+  if (!turma){ toast('Escolhe a turma.', 'err'); return; }
+  const datas = datasParaGerar();
+  if (datas.length === 0){ toast('Nenhuma data pra gerar com essas opções.', 'err'); return; }
+
+  // Evita duplicar sessão num dia que a turma já tem marcado. A lista em tela
+  // só guarda as sessões mais recentes, então confere direto no banco.
+  const { data: existentes, error: eErr } = await sb
+    .from('sessoes').select('data').eq('turma_id', turma.id).in('data', datas);
+  if (eErr){ toast('Erro ao conferir sessões existentes: ' + eErr.message, 'err'); return; }
+  const jaExiste = new Set((existentes || []).map(s => s.data));
+  const novasDatas = datas.filter(d => !jaExiste.has(d));
+  if (novasDatas.length === 0){ toast('Essa turma já tem sessão marcada em todas essas datas.', 'err'); return; }
+
+  const duracaoPadrao = (turma.horario_inicio && turma.horario_fim)
+    ? Math.max(1, Math.round((new Date('1970-01-01T' + turma.horario_fim) - new Date('1970-01-01T' + turma.horario_inicio)) / 60000))
+    : 90;
+  const linhas = novasDatas.map(data => ({
+    data,
+    hora_inicio: turma.horario_inicio || null,
+    duracao_min: duracaoPadrao,
+    tipo: f.tipo,
+    turma_id: turma.id,
+    local: turma.local || null,
+  }));
+
+  const resp = await sb.from('sessoes').insert(linhas);
+  if (resp.error){ toast('Não foi possível gerar as sessões: ' + resp.error.message, 'err'); return; }
+
+  const puladas = datas.length - novasDatas.length;
+  toast(`${novasDatas.length} sessõe${novasDatas.length===1?'':'s'} criada${novasDatas.length===1?'':'s'}` +
+    (puladas > 0 ? ` (${puladas} já existia${puladas===1?'':'m'} e ${puladas===1?'foi pulada':'foram puladas'}).` : '.'), 'ok');
+  await carregarSessoes();
+  voltarParaSessoes();
 }
 
 function sincronizarSessaoDoDom(){
@@ -1441,7 +1620,7 @@ async function salvarNovaSessao(ev){
 }
 
 async function abrirSessaoDetalhe(id){
-  state.aba = 'treinos';
+  marcarAba('treinos');
   state.view = 'sessao-detail';
   state.sessaoAtual = { id, carregando: true };
   render();
@@ -1668,7 +1847,7 @@ function abrirNovaBateria(){
   state.testeBateriaForm = {
     teste_id: state.testes[0]?.id ? String(state.testes[0].id) : '',
     data: new Date().toISOString().slice(0, 10),
-    bateria: '', avaliador: '', condicoes: '', busca: '',
+    bateria: '', avaliador: '', condicoes: '', busca: '', turma_id: '',
     valores: {},
   };
   state.view = 'teste-bateria';
@@ -1688,6 +1867,7 @@ function sincronizarBateriaDoDom(){
   if (g('tb-bateria'))   f.bateria = g('tb-bateria').value;
   if (g('tb-avaliador')) f.avaliador = g('tb-avaliador').value;
   if (g('tb-condicoes')) f.condicoes = g('tb-condicoes').value;
+  if (g('tb-turma'))     f.turma_id = g('tb-turma').value;
   document.querySelectorAll('[data-valor-atleta]').forEach(el => {
     f.valores[el.dataset.valorAtleta] = el.value;
   });
@@ -1702,6 +1882,15 @@ function setTesteDaBateria(testeId){
 function atualizarBuscaBateria(valor){
   sincronizarBateriaDoDom();
   state.testeBateriaForm.busca = valor;
+  render();
+}
+
+// Escolher a turma restringe a lista pro grupo que vai fazer o teste hoje —
+// nem sempre é a galera toda, então precisa dar pra escolher um grupo
+// específico em vez de sempre cair na lista inteira de atletas ativos.
+function atualizarTurmaBateria(valor){
+  sincronizarBateriaDoDom();
+  state.testeBateriaForm.turma_id = valor;
   render();
 }
 
@@ -1764,7 +1953,7 @@ function voltarDoGuiaTestes(){
 
 // Atalho a partir da ficha do atleta: já filtra a lista de testes por ele.
 async function verTestesDoAtleta(atletaId){
-  state.aba = 'treinos';
+  marcarAba('treinos');
   state.filtroTestes = { atletaId, testeId: '' };
   state.view = 'testes';
   render();
@@ -1819,7 +2008,7 @@ async function voltarParaEvento(){
 /* -------- eventos (competições) -------- */
 
 async function abrirEvento(competicaoId){
-  state.aba = 'jogos';
+  marcarAba('jogos');
   state.view = 'evento-detalhe';
   state.eventoAtualId = competicaoId;
   state.eventoAtual = { carregando: true };
@@ -2476,6 +2665,26 @@ function errosMaisComuns(atletaId){
   return Object.entries(contagem).sort((a, b) => b[1] - a[1]);
 }
 
+// Detalhe de saque: quebra os pontos ganhos de saque (ace) por tipo — viagem,
+// flutuado, parado — igual já existia pros erros, só que pro lado positivo.
+// Erro de saque entra separado, porque no scout ele é um "erro_nosso" com
+// subtipo "saque", não um "saque" que perdeu o ponto.
+function saqueDetalhado(atletaId){
+  const acesPorTipo = {};
+  let erros = 0;
+  ralliesDoAtleta(atletaId).forEach(r => {
+    if (r.origem === 'saque'){
+      const nome = r.subtipos_acao?.nome || 'Geral';
+      acesPorTipo[nome] = (acesPorTipo[nome] || 0) + 1;
+    } else if (r.origem === 'erro_nosso' && r.subtipos_acao?.codigo === 'saque'){
+      erros++;
+    }
+  });
+  const aces = Object.entries(acesPorTipo).sort((a, b) => b[1] - a[1]);
+  const totalAces = aces.reduce((s, [, qtd]) => s + qtd, 0);
+  return { aces, erros, totalAces, aproveitamento: aproveitamento(totalAces, erros) };
+}
+
 function evolucaoTemporal(atletaId){
   const porJogo = {};
   ralliesDoAtleta(atletaId).forEach(r => {
@@ -2497,8 +2706,12 @@ function jogosDoAtleta(atletaId){
     .sort((a, b) => new Date(b.criado_em) - new Date(a.criado_em));
 }
 
-function comparacaoAtletas(){
-  return state.atletas.map(a => {
+// filtroIds vazio (ou não informado) = todo mundo, igual sempre foi. Quando
+// tem gente marcada no filtro, restringe a comparação só a esse grupo — pra
+// não precisar rolar os 50+ atletas quando só interessa comparar um time.
+function comparacaoAtletas(filtroIds){
+  const base = (filtroIds && filtroIds.size > 0) ? state.atletas.filter(a => filtroIds.has(a.id)) : state.atletas;
+  return base.map(a => {
     const st = statsFundamento(a.id);
     const ganhos = FUNDAMENTOS.reduce((s, f) => s + st[f].ganhos, 0);
     const erros = FUNDAMENTOS.reduce((s, f) => s + st[f].erros, 0);
@@ -2513,9 +2726,23 @@ function selecionarAtletaEstatisticas(id){
   render();
 }
 
+function toggleFiltroEstatisticas(atletaId){
+  const s = state.statsFiltroAtletaIds;
+  s.has(atletaId) ? s.delete(atletaId) : s.add(atletaId);
+  render();
+}
+function limparFiltroEstatisticas(){
+  state.statsFiltroAtletaIds.clear();
+  render();
+}
+function toggleAbrirFiltroEstatisticas(){
+  state.statsFiltroAberto = !state.statsFiltroAberto;
+  render();
+}
+
 function verEstatisticasDoAtleta(atletaId){
   state.statsAtletaId = atletaId;
-  state.aba = 'estatisticas';
+  marcarAba('estatisticas');
   state.view = 'estatisticas';
   render();
 }
@@ -2565,6 +2792,7 @@ function render(){
   if (state.view === 'turma-edit')    return renderTurmaEdit();
   if (state.view === 'sessoes')       return renderSessoes();
   if (state.view === 'sessao-edit')   return renderSessaoEdit();
+  if (state.view === 'sessao-gerar')  return renderSessaoGerar();
   if (state.view === 'sessao-detail') return renderSessaoDetail();
   if (state.view === 'testes')        return renderTestes();
   if (state.view === 'teste-bateria') return renderTesteBateria();
@@ -2691,9 +2919,10 @@ where email = '${escapeHtml(email)}';</code>
 function renderDashboard(){
   const ativos = state.atletas.filter(a => a.status === 'ativo').length;
   const turmasAtivas = state.turmas.filter(t => t.ativo).length;
-  const aniversariantes = aniversariantesProximos(30);
+  const aniversariantes = aniversariantesDoMes();
   const eventos = proximosEventos(5);
   const sessoes = proximasSessoes(5);
+  const hojeDia = new Date().getDate();
 
   app.innerHTML = `
     ${renderTopbar()}
@@ -2707,11 +2936,11 @@ function renderDashboard(){
       <p class="muted" style="margin-bottom:16px">Visão geral da comissão técnica.</p>
 
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:20px">
-        <div class="card" style="text-align:center">
+        <div class="card" style="text-align:center;cursor:pointer" onclick="verAtletasAtivosDoDashboard()">
           <div style="font-size:1.6rem;font-weight:800">${ativos}</div>
           <div class="muted" style="font-size:.8rem">atleta${ativos===1?'':'s'} ativo${ativos===1?'':'s'}</div>
         </div>
-        <div class="card" style="text-align:center">
+        <div class="card" style="text-align:center;cursor:pointer" onclick="verTurmasAtivasDoDashboard()">
           <div style="font-size:1.6rem;font-weight:800">${turmasAtivas}</div>
           <div class="muted" style="font-size:.8rem">turma${turmasAtivas===1?'':'s'} ativa${turmasAtivas===1?'':'s'}</div>
         </div>
@@ -2719,25 +2948,27 @@ function renderDashboard(){
           <div style="font-size:1.6rem;font-weight:800">${eventos.length}</div>
           <div class="muted" style="font-size:.8rem">evento${eventos.length===1?'':'s'} por vir</div>
         </div>
-        <div class="card" style="text-align:center">
+        <div class="card" style="text-align:center;cursor:pointer" onclick="toggleAniversariantesDashboard()">
           <div style="font-size:1.6rem;font-weight:800">${aniversariantes.length}</div>
-          <div class="muted" style="font-size:.8rem">aniversário${aniversariantes.length===1?'':'s'} nos próx. 30 dias</div>
+          <div class="muted" style="font-size:.8rem">aniversário${aniversariantes.length===1?'':'s'} este mês</div>
         </div>
       </div>
 
-      <div class="section-title">Aniversariantes</div>
-      <div class="card" style="padding:4px 16px;margin-bottom:20px">
-        ${aniversariantes.length === 0 ? `<div class="empty">Ninguém faz aniversário nos próximos 30 dias.</div>` :
-          aniversariantes.map(x => `
-            <div class="presenca-row">
-              <span class="nome">${escapeHtml(x.atleta.nome)}</span>
-              <span class="muted" style="font-size:.85rem">
-                ${x.proxima.toLocaleDateString('pt-BR', {day:'2-digit', month:'2-digit'})}
-                · completa ${x.idadeQueFaz} anos · ${descricaoDiasRestantes(x.diffDias)}
-              </span>
-            </div>
-          `).join('')}
-      </div>
+      ${state.dashboardAniversariantesAberto ? `
+        <div class="section-title">Aniversariantes do mês</div>
+        <div class="card" style="padding:4px 16px;margin-bottom:20px">
+          ${aniversariantes.length === 0 ? `<div class="empty">Ninguém faz aniversário este mês.</div>` :
+            aniversariantes.map(x => `
+              <div class="presenca-row">
+                <span class="nome">${escapeHtml(x.atleta.nome)}</span>
+                <span class="muted" style="font-size:.85rem">
+                  dia ${String(x.dia).padStart(2,'0')} · completa ${x.idadeQueFaz} anos
+                  ${x.dia === hojeDia ? ' · é hoje!' : x.dia < hojeDia ? ' · já passou' : ''}
+                </span>
+              </div>
+            `).join('')}
+        </div>
+      ` : ''}
 
       <div class="section-title">Próximos eventos</div>
       <div style="margin-bottom:20px">
@@ -2995,17 +3226,13 @@ function renderFicha(){
           <div class="section">
             <div class="section-title">Contato</div>
             <div class="row2">
-              <div class="field"><label>Telefone</label>
+              <div class="field"><label>Telefone / WhatsApp</label>
                 <input id="f-telefone" value="${escapeHtml(f.telefone)}"></div>
-              <div class="field"><label>WhatsApp</label>
-                <input id="f-whatsapp" value="${escapeHtml(f.whatsapp)}"></div>
-            </div>
-            <div class="row2">
-              <div class="field"><label>Instagram</label>
-                <input id="f-instagram" placeholder="@perfil" value="${escapeHtml(f.instagram)}"></div>
               <div class="field"><label>E-mail</label>
                 <input id="f-email" type="email" value="${escapeHtml(f.email)}"></div>
             </div>
+            <div class="field"><label>Instagram</label>
+              <input id="f-instagram" placeholder="@perfil" value="${escapeHtml(f.instagram)}"></div>
           </div>
 
           <div class="section">
@@ -3041,7 +3268,7 @@ function renderFicha(){
           <div class="section">
             <div class="section-title">Link do atleta</div>
             <p class="muted" style="margin-top:-4px">Mande esse endereço uma vez pelo WhatsApp. É fixo — não muda: o atleta
-              usa pra completar o próprio cadastro (telefone, WhatsApp, Instagram, data de nascimento, altura, peso,
+              usa pra completar o próprio cadastro (telefone/WhatsApp, Instagram, data de nascimento, altura, peso,
               contato do responsável) e também abre todo dia pra responder antes e depois do treino, sem precisar de login.</p>
             ${state.fichaToken === undefined ? `<p class="muted">Carregando…</p>` :
               state.fichaToken ? `
@@ -3179,9 +3406,15 @@ function renderTurmaEdit(){
   const t = state.turmaEdit;
   const editando = !!t.id;
   const busca = state.buscaMembroTurma.toLowerCase();
+  // Modo "adicionar": lista inteira (com busca) pra marcar quem entra.
+  // Modo padrão: só quem já é membro — não fica difícil achar alguém no
+  // meio de todo mundo só pra ver quem já está na turma.
   const atletasVisiveis = state.atletas
     .filter(a => a.status === 'ativo')
     .filter(a => !busca || (a.nome||'').toLowerCase().includes(busca));
+  const membros = state.atletas
+    .filter(a => state.turmaMembrosIds?.has(a.id))
+    .sort((a, b) => (a.nome||'').localeCompare(b.nome||''));
 
   app.innerHTML = `
     ${renderTopbar()}
@@ -3227,22 +3460,43 @@ function renderTurmaEdit(){
       </div>
 
       ${editando ? `
-        <div class="section-title" style="margin-top:26px">Atletas na turma (${state.turmaMembrosIds.size})</div>
-        <input placeholder="Buscar atleta…" value="${escapeHtml(state.buscaMembroTurma)}"
-               oninput="atualizarBuscaMembro(this.value)"
-               style="width:100%;background:var(--card);border:1px solid var(--line);color:var(--tx);
-                      border-radius:9px;padding:9px 12px;font-size:.87rem;margin-bottom:10px">
-        <div class="card" style="padding:6px 16px">
-          ${atletasVisiveis.length === 0 ? `<div class="empty">Nenhum atleta encontrado.</div>` :
-            atletasVisiveis.map(a => `
-              <div class="membro-row">
-                <input type="checkbox" class="checkbox-big" ${state.turmaMembrosIds.has(a.id)?'checked':''}
-                       onchange="toggleMembroTurma('${a.id}')">
-                <span class="nome">${escapeHtml(a.nome)}</span>
-                <span class="sub-cel">${a.categorias ? escapeHtml(a.categorias.nome) : ''}</span>
-              </div>
-            `).join('')}
+        <div style="display:flex;align-items:center;gap:10px;margin-top:26px;margin-bottom:10px">
+          <div class="section-title" style="margin:0;flex:1">Atletas na turma (${membros.length})</div>
+          ${!state.turmaAdicionarAberto ? `<button type="button" class="btn btn-sm" onclick="abrirAdicionarMembrosTurma()">+ Adicionar atletas</button>` : ''}
         </div>
+
+        ${!state.turmaAdicionarAberto ? `
+          <div class="card" style="padding:6px 16px">
+            ${membros.length === 0 ? `<div class="empty">Nenhum atleta nesta turma ainda. Clica em "+ Adicionar atletas".</div>` :
+              membros.map(a => `
+                <div class="membro-row">
+                  <span class="nome">${escapeHtml(a.nome)}</span>
+                  <span class="sub-cel">${a.categorias ? escapeHtml(a.categorias.nome) : ''}</span>
+                  <button type="button" class="btn btn-ghost btn-sm" style="color:var(--d)" onclick="toggleMembroTurma('${a.id}')">Remover</button>
+                </div>
+              `).join('')}
+          </div>
+        ` : `
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+            <input placeholder="Buscar atleta…" value="${escapeHtml(state.buscaMembroTurma)}"
+                   oninput="atualizarBuscaMembro(this.value)"
+                   style="flex:1;background:var(--card);border:1px solid var(--line);color:var(--tx);
+                          border-radius:9px;padding:9px 12px;font-size:.87rem">
+            <button type="button" class="btn btn-sm" onclick="fecharAdicionarMembrosTurma()">Concluir</button>
+          </div>
+          <p class="muted" style="margin-top:-4px">Marca quem faz parte da turma. Desmarcar tira da turma.</p>
+          <div class="card" style="padding:6px 16px">
+            ${atletasVisiveis.length === 0 ? `<div class="empty">Nenhum atleta encontrado.</div>` :
+              atletasVisiveis.map(a => `
+                <div class="membro-row">
+                  <input type="checkbox" class="checkbox-big" ${state.turmaMembrosIds.has(a.id)?'checked':''}
+                         onchange="toggleMembroTurma('${a.id}')">
+                  <span class="nome">${escapeHtml(a.nome)}</span>
+                  <span class="sub-cel">${a.categorias ? escapeHtml(a.categorias.nome) : ''}</span>
+                </div>
+              `).join('')}
+          </div>
+        `}
       ` : ''}
     </div>`;
 }
@@ -3256,6 +3510,7 @@ function renderSessoes(){
       ${renderSubnavTreinos()}
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
         <h1 style="flex:1">Sessões</h1>
+        <button class="btn btn-ghost" onclick="abrirGerarSessoes()">Gerar sessões</button>
         <button class="btn btn-primary" onclick="abrirNovaSessao()">+ Nova sessão</button>
       </div>
 
@@ -3314,6 +3569,65 @@ function renderSessaoEdit(){
 
           <div class="ficha-actions">
             <button type="submit" class="btn btn-primary">Criar sessão</button>
+            <button type="button" class="btn btn-ghost" onclick="voltarParaSessoes()">Cancelar</button>
+          </div>
+        </form>
+      </div>
+    </div>`;
+}
+
+function renderSessaoGerar(){
+  const f = state.sessaoGerar;
+  const turma = state.turmas.find(t => t.id === f.turma_id);
+  const turmasComDias = state.turmas.filter(t => t.ativo && (t.dias_semana || []).length > 0);
+  const datas = datasParaGerar();
+
+  app.innerHTML = `
+    ${renderTopbar()}
+    <div class="main">
+      <button class="btn btn-ghost btn-sm" style="margin-bottom:14px" onclick="voltarParaSessoes()">← Voltar</button>
+      <h1>Gerar sessões pré-agendadas</h1>
+      <p class="muted" style="margin-bottom:20px">Cria várias sessões de uma vez, nos dias fixos e no horário já cadastrados na turma.</p>
+
+      <div class="card">
+        <form onsubmit="salvarSessoesGeradas(event)">
+          <div class="field">
+            <label>Turma *</label>
+            <select id="sg-turma" onchange="atualizarGerarSessoes()">
+              ${turmasComDias.length === 0 ? `<option value="">Nenhuma turma com dias fixos cadastrados</option>` :
+                turmasComDias.map(t => `<option value="${t.id}" ${f.turma_id===t.id?'selected':''}>${escapeHtml(t.nome)}</option>`).join('')}
+            </select>
+            ${turmasComDias.length === 0 ? `<p class="muted" style="margin-top:6px">Cadastra os dias da semana e o horário na turma primeiro (aba de Turmas).</p>` : ''}
+          </div>
+
+          ${turma ? `
+            <p class="muted" style="margin:-6px 0 16px">
+              Dias fixos: ${turma.dias_semana.map(d => DIAS_SEMANA.find(([c]) => c === d)?.[1] || d).join(', ')}
+              ${turma.horario_inicio ? ' · ' + turma.horario_inicio.slice(0,5) : ''}${turma.horario_fim ? '–' + turma.horario_fim.slice(0,5) : ''}
+            </p>
+          ` : ''}
+
+          <div class="row2">
+            <div class="field"><label>A partir de *</label><input id="sg-data" type="date" value="${f.data_inicio}" onchange="atualizarGerarSessoes()" required></div>
+            <div class="field"><label>Por quantas semanas *</label><input id="sg-semanas" type="number" min="1" max="26" value="${f.semanas}" onchange="atualizarGerarSessoes()" required></div>
+          </div>
+
+          <div class="field">
+            <label>Tipo</label>
+            <div class="seg">
+              ${[['tecnico','Técnico'],['tatico','Tático'],['fisico','Físico'],['jogo_treino','Jogo-treino'],['competicao','Competição'],['recuperativo','Recuperativo']]
+                .map(([c,n]) => `<button type="button" class="${f.tipo===c?'on':''}" onclick="setTipoGerarSessoes('${c}')">${n}</button>`).join('')}
+            </div>
+          </div>
+
+          <div class="section-title">Sessões que serão criadas (${datas.length})</div>
+          <div class="card" style="max-height:220px;overflow:auto">
+            ${datas.length === 0 ? `<div class="empty">Escolhe a turma, a data de início e o período pra ver a prévia.</div>` :
+              datas.map(d => `<div class="list-item" style="cursor:default">${new Date(d+'T00:00:00').toLocaleDateString('pt-BR', {weekday:'long', day:'2-digit', month:'2-digit'})}</div>`).join('')}
+          </div>
+
+          <div class="ficha-actions" style="margin-top:16px">
+            <button type="submit" class="btn btn-primary" ${datas.length===0?'disabled':''}>Gerar ${datas.length} sessõe${datas.length===1?'':'s'}</button>
             <button type="button" class="btn btn-ghost" onclick="voltarParaSessoes()">Cancelar</button>
           </div>
         </form>
@@ -3428,6 +3742,7 @@ function renderTesteBateria(){
   const busca = f.busca.toLowerCase();
   const atletas = state.atletas
     .filter(a => a.status === 'ativo')
+    .filter(a => !f.turma_id || (state.turmaAtletasMap[a.id] || []).includes(f.turma_id))
     .filter(a => !busca || (a.nome||'').toLowerCase().includes(busca) || (a.apelido||'').toLowerCase().includes(busca))
     .sort((a,b) => (a.nome||'').localeCompare(b.nome||''));
 
@@ -3478,13 +3793,22 @@ function renderTesteBateria(){
           ` : ''}
         </div>
 
-        <div class="field">
-          <label>Buscar atleta</label>
-          <input placeholder="Filtrar por nome ou apelido…" value="${escapeHtml(f.busca)}" oninput="atualizarBuscaBateria(this.value)">
+        <div class="row2">
+          <div class="field">
+            <label>Turma (opcional)</label>
+            <select id="tb-turma" onchange="atualizarTurmaBateria(this.value)">
+              <option value="">Todos os atletas ativos</option>
+              ${state.turmas.filter(t => t.ativo).map(t => `<option value="${t.id}" ${f.turma_id===t.id?'selected':''}>${escapeHtml(t.nome)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field">
+            <label>Buscar atleta</label>
+            <input placeholder="Filtrar por nome ou apelido…" value="${escapeHtml(f.busca)}" oninput="atualizarBuscaBateria(this.value)">
+          </div>
         </div>
 
         <div class="card" style="padding:4px 16px;margin-top:10px">
-          ${atletas.length === 0 ? `<div class="empty">Nenhum atleta ativo encontrado.</div>` :
+          ${atletas.length === 0 ? `<div class="empty">${f.turma_id ? 'Nenhum atleta ativo nessa turma.' : 'Nenhum atleta ativo encontrado.'}</div>` :
             atletas.map(a => `
               <div class="presenca-row">
                 <span class="nome">${escapeHtml(a.nome)}${a.apelido ? ` <span class="muted">"${escapeHtml(a.apelido)}"</span>` : ''}</span>
@@ -3892,6 +4216,7 @@ function renderEstatisticas(){
 
   const atletaId = state.statsAtletaId;
   const atletasOrdenados = [...state.atletas].sort((a,b) => (a.nome||'').localeCompare(b.nome||''));
+  const qtdFiltro = state.statsFiltroAtletaIds.size;
 
   app.innerHTML = `
     ${renderTopbar()}
@@ -3906,6 +4231,25 @@ function renderEstatisticas(){
           ${atletasOrdenados.map(a => `<option value="${a.id}" ${atletaId===a.id?'selected':''}>${escapeHtml(a.nome)}</option>`).join('')}
         </select>
       </div>
+
+      ${!atletaId ? `
+        <button type="button" class="btn btn-ghost btn-sm" style="margin-bottom:12px" onclick="toggleAbrirFiltroEstatisticas()">
+          ${state.statsFiltroAberto ? 'Esconder filtro de atletas' : `Filtrar atletas${qtdFiltro > 0 ? ` (${qtdFiltro} selecionado${qtdFiltro===1?'':'s'})` : ''}`}
+        </button>
+        ${state.statsFiltroAberto ? `
+          <div class="card" style="padding:6px 16px;margin-bottom:16px;max-height:260px;overflow-y:auto">
+            <div style="display:flex;justify-content:flex-end;margin:6px 0">
+              <button type="button" class="btn btn-ghost btn-sm" onclick="limparFiltroEstatisticas()">Limpar seleção (voltar a comparar todos)</button>
+            </div>
+            ${atletasOrdenados.map(a => `
+              <label style="display:flex;align-items:center;gap:8px;padding:5px 0;cursor:pointer">
+                <input type="checkbox" ${state.statsFiltroAtletaIds.has(a.id)?'checked':''} onchange="toggleFiltroEstatisticas('${a.id}')">
+                ${escapeHtml(a.nome)}
+              </label>
+            `).join('')}
+          </div>
+        ` : ''}
+      ` : ''}
 
       ${atletaId ? renderStatsAtleta(atletaId) : renderStatsComparacao()}
     </div>`;
@@ -3924,12 +4268,13 @@ function barraAproveitamento(pct){
 }
 
 function renderStatsComparacao(){
-  const ranking = comparacaoAtletas();
+  const filtroAtivo = state.statsFiltroAtletaIds.size > 0;
+  const ranking = comparacaoAtletas(state.statsFiltroAtletaIds);
   if (ranking.length === 0){
-    return `<div class="empty" style="margin-top:20px">Ainda não há pontos suficientes marcados no scout pra gerar uma comparação.</div>`;
+    return `<div class="empty" style="margin-top:20px">${filtroAtivo ? 'Nenhum dos atletas selecionados no filtro tem pontos suficientes marcados no scout ainda.' : 'Ainda não há pontos suficientes marcados no scout pra gerar uma comparação.'}</div>`;
   }
   return `
-    <div class="section-title" style="margin-top:22px">Aproveitamento geral (ataque + saque + bloqueio vs. erro nosso)</div>
+    <div class="section-title" style="margin-top:22px">Aproveitamento geral${filtroAtivo ? ` (${ranking.length} atleta${ranking.length===1?'':'s'} selecionado${ranking.length===1?'':'s'})` : ''} (ataque + saque + bloqueio vs. erro nosso)</div>
     <table>
       <thead><tr><th>Atleta</th><th>Aproveitamento</th><th>Ganhos</th><th>Erros</th></tr></thead>
       <tbody>
@@ -3951,6 +4296,7 @@ function renderStatsAtleta(atletaId){
   const erros = errosMaisComuns(atletaId);
   const evolucao = evolucaoTemporal(atletaId);
   const jogos = jogosDoAtleta(atletaId);
+  const saque = saqueDetalhado(atletaId);
 
   return `
     <h2 style="margin-top:22px">${escapeHtml(atleta?.apelido || atleta?.nome || 'Atleta')}</h2>
@@ -3967,6 +4313,23 @@ function renderStatsAtleta(atletaId){
           </div>`;
       }).join('')}
     </div>
+
+    <div class="section-title" style="margin-top:24px">Saque em detalhe</div>
+    ${saque.totalAces === 0 && saque.erros === 0 ? `<div class="empty">Nenhum ponto de saque registrado ainda pra este atleta.</div>` : `
+      <div class="card">
+        <div style="display:flex;gap:18px;flex-wrap:wrap;margin-bottom:${saque.aces.length ? '14px' : '0'}">
+          <div><div class="muted" style="margin-bottom:2px">Aproveitamento</div><div style="font-weight:800;font-size:1.2rem">${saque.aproveitamento===null?'—':saque.aproveitamento+'%'}</div></div>
+          <div><div class="muted" style="margin-bottom:2px">Aces</div><div style="font-weight:800;font-size:1.2rem">${saque.totalAces}</div></div>
+          <div><div class="muted" style="margin-bottom:2px">Erros de saque</div><div style="font-weight:800;font-size:1.2rem">${saque.erros}</div></div>
+        </div>
+        ${saque.aces.length ? `
+          <div class="muted" style="margin-bottom:6px;font-size:.8rem">Aces por tipo</div>
+          ${saque.aces.map(([nome, qtd]) => `
+            <div class="presenca-row"><span class="nome">${escapeHtml(nome)}</span><span class="pill">${qtd}</span></div>
+          `).join('')}
+        ` : ''}
+      </div>
+    `}
 
     <div class="section-title" style="margin-top:24px">Evolução ao longo dos jogos</div>
     ${evolucao.length === 0 ? `<div class="empty">Ainda sem jogos com pontos marcados no scout pra este atleta.</div>` : `
